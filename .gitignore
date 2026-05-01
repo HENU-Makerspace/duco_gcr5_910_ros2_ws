@@ -1,0 +1,31 @@
+# ROS 2 / colcon build outputs
+build/
+install/
+log/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# CMake / compiler outputs
+CMakeCache.txt
+CMakeFiles/
+*.o
+*.so
+
+# Editor and OS files
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+
+# Runtime data
+*.bag
+*.db3
+*.mcap
+*.log
+
+# Local environment files
+.env
+.env.*

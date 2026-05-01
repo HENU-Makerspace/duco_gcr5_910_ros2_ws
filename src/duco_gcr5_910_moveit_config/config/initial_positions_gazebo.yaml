@@ -1,0 +1,9 @@
+# Gazebo default pose, aligned with the real GCR5-910 pose observed during setup.
+
+initial_positions:
+  arm_1_joint_1: -1.570711
+  arm_1_joint_2: 0.610808
+  arm_1_joint_3: -2.181449
+  arm_1_joint_4: -0.000137
+  arm_1_joint_5: 1.570372
+  arm_1_joint_6: -0.000143
