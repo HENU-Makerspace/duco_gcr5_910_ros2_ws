@@ -134,6 +134,41 @@ Expected actions:
 /sim_arm_1_controller/follow_joint_trajectory
 ```
 
+## Siemens PLC Modbus TCP Bridge
+
+ROS 2 can run as a Modbus TCP Server for a Siemens S7-1214C PLC. Install the Python dependency first:
+
+```bash
+python3 -m pip install "pymodbus>=3.0.0"
+```
+
+Run the bridge:
+
+```bash
+cd /home/me/duco_ros2_ws
+export PATH=/usr/bin:/bin:$PATH
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+
+ros2 run plc_modbus_bridge plc_modbus_bridge
+```
+
+Register map, 0-based addressing:
+
+```text
+0       40001  Control Word: 1=trigger, 0=idle
+1-2     40002  Target X Float32, Siemens Big-Endian
+3-4     40004  Target Y Float32, Siemens Big-Endian
+5-6     40006  Target Z Float32, Siemens Big-Endian
+19      40020  Status Word: 0=idle, 1=moving, 2=reached
+```
+
+Port `502` may require elevated privileges on Linux. For early testing, use a high port:
+
+```bash
+ros2 run plc_modbus_bridge plc_modbus_bridge --ros-args -p listen_port:=1502
+```
+
 ## Notes
 
 - `build/`, `install/`, and `log/` are generated locally and are ignored by git.
