@@ -169,6 +169,61 @@ Port `502` may require elevated privileges on Linux. For early testing, use a hi
 ros2 run plc_modbus_bridge plc_modbus_bridge --ros-args -p listen_port:=1502
 ```
 
+## Siemens PLC S7 DB Bridge
+
+This bridge uses Siemens S7 communication through `python-snap7`. It is separate from Modbus TCP. Use it when the PLC program exposes command and status bits in `DB1`.
+
+PLC side assumptions:
+
+```text
+PLC IP: 192.168.6.1
+DB number: DB1
+DB1.DBX0.0  ROS command: robot power enable
+DB1.DBX0.1  ROS command: gripper close
+DB1.DBX1.0  PLC status: robot ready
+DB1.DBX1.1  PLC status: emergency stop
+```
+
+TIA Portal settings:
+
+```text
+Enable PUT/GET communication access
+Disable optimized block access for DB1
+Use S7-1200 rack=0, slot=1
+```
+
+Install dependency:
+
+```bash
+/usr/bin/python3 -m pip install --user --break-system-packages python-snap7
+```
+
+Run:
+
+```bash
+cd /home/me/duco_ros2_ws
+export PATH=/usr/bin:/bin:$PATH
+source /opt/ros/jazzy/setup.bash
+source install/setup.bash
+
+ros2 run plc_s7_bridge plc_s7_bridge --ros-args -p plc_ip:=192.168.6.1 -p db_number:=1
+```
+
+Published topics:
+
+```text
+/plc/robot_ready  std_msgs/Bool
+/plc/e_stop       std_msgs/Bool
+```
+
+Command services:
+
+```bash
+ros2 service call /plc/set_power_on std_srvs/srv/SetBool "{data: true}"
+ros2 service call /plc/set_gripper_close std_srvs/srv/SetBool "{data: true}"
+ros2 service call /plc/clear_commands std_srvs/srv/Trigger "{}"
+```
+
 ## Notes
 
 - `build/`, `install/`, and `log/` are generated locally and are ignored by git.
