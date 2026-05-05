@@ -2,7 +2,6 @@
 """ROS 2 bridge for Siemens S7-1214C PLC DB bit control."""
 
 import threading
-import time
 from typing import Optional
 
 import rclpy
@@ -58,7 +57,6 @@ class PlcS7Bridge(Node):
         self.declare_parameter("disable_ready_bit", 0)
         self.declare_parameter("estop_byte", -1)
         self.declare_parameter("estop_bit", -1)
-        self.declare_parameter("command_pulse_seconds", 0.2)
         self.declare_parameter("poll_period", 0.5)
         self.declare_parameter("auto_reconnect", True)
 
@@ -79,9 +77,6 @@ class PlcS7Bridge(Node):
         self.disable_ready_bit = int(self.get_parameter("disable_ready_bit").value)
         self.estop_byte = int(self.get_parameter("estop_byte").value)
         self.estop_bit = int(self.get_parameter("estop_bit").value)
-        self.command_pulse_seconds = float(
-            self.get_parameter("command_pulse_seconds").value
-        )
         self.auto_reconnect = bool(self.get_parameter("auto_reconnect").value)
 
         self._plc = snap7.client.Client()
@@ -297,27 +292,31 @@ class PlcS7Bridge(Node):
             self.suction_on_cmd = suction_on
         return self._write_plc_command_bits()
 
-    def _pulse_command(self, command_name: str) -> bool:
-        true_args = {command_name: True}
-        false_args = {command_name: False}
-        if not self._set_command_state(**true_args):
-            return False
-        time.sleep(self.command_pulse_seconds)
-        return self._set_command_state(**false_args)
+    def _request_power_on(self) -> bool:
+        return self._set_command_state(power_on=True, power_off=False)
+
+    def _request_power_off(self) -> bool:
+        return self._set_command_state(power_on=False, power_off=True)
+
+    def _request_enable(self) -> bool:
+        return self._set_command_state(enable=True, disable=False)
+
+    def _request_disable(self) -> bool:
+        return self._set_command_state(enable=False, disable=True)
 
     def _handle_set_power_on(self, request: SetBool.Request, response: SetBool.Response):
-        ok = self._pulse_command("power_on" if request.data else "power_off")
+        ok = self._request_power_on() if request.data else self._request_power_off()
         response.success = ok
         response.message = (
-            "power_on pulse written" if request.data else "power_off pulse written"
+            "power_on request held" if request.data else "power_off request held"
         ) if ok else "failed to write power command"
         return response
 
     def _handle_set_enable(self, request: SetBool.Request, response: SetBool.Response):
-        ok = self._pulse_command("enable" if request.data else "disable")
+        ok = self._request_enable() if request.data else self._request_disable()
         response.success = ok
         response.message = (
-            "enable pulse written" if request.data else "disable pulse written"
+            "enable request held" if request.data else "disable request held"
         ) if ok else "failed to write enable command"
         return response
 
@@ -325,32 +324,32 @@ class PlcS7Bridge(Node):
         self, request: Trigger.Request, response: Trigger.Response
     ):
         del request
-        response.success = self._pulse_command("power_on")
-        response.message = "power_on pulse written" if response.success else "failed"
+        response.success = self._request_power_on()
+        response.message = "power_on request held" if response.success else "failed"
         return response
 
     def _handle_request_power_off(
         self, request: Trigger.Request, response: Trigger.Response
     ):
         del request
-        response.success = self._pulse_command("power_off")
-        response.message = "power_off pulse written" if response.success else "failed"
+        response.success = self._request_power_off()
+        response.message = "power_off request held" if response.success else "failed"
         return response
 
     def _handle_request_enable(
         self, request: Trigger.Request, response: Trigger.Response
     ):
         del request
-        response.success = self._pulse_command("enable")
-        response.message = "enable pulse written" if response.success else "failed"
+        response.success = self._request_enable()
+        response.message = "enable request held" if response.success else "failed"
         return response
 
     def _handle_request_disable(
         self, request: Trigger.Request, response: Trigger.Response
     ):
         del request
-        response.success = self._pulse_command("disable")
-        response.message = "disable pulse written" if response.success else "failed"
+        response.success = self._request_disable()
+        response.message = "disable request held" if response.success else "failed"
         return response
 
     def _handle_set_suction_on(self, request: SetBool.Request, response: SetBool.Response):

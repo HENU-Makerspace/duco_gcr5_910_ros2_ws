@@ -178,10 +178,10 @@ PLC side assumptions:
 ```text
 PLC IP: 192.168.6.1
 DB number: DB5
-DB5.DBX8.0  ROS command pulse: request robot power-on
-DB5.DBX8.1  ROS command pulse: request robot power-off
-DB5.DBX8.2  ROS command pulse: request robot enable
-DB5.DBX8.3  ROS command pulse: request robot disable
+DB5.DBX8.0  ROS held command: request robot power-on
+DB5.DBX8.1  ROS held command: request robot power-off
+DB5.DBX8.2  ROS held command: request robot enable
+DB5.DBX8.3  ROS held command: request robot disable
 DB5.DBX8.4  ROS command: suction on, reserved for later
 DB5.DBX8.5  PLC status: power-on feedback ready
 DB5.DBX8.6  PLC status: enable feedback ready

@@ -36,17 +36,17 @@ DB5.DBX9.0   Bool      PLC下使能反馈已就绪
 当前要跑通的是：
 
 ```text
-ROS2 -> PLC: 触发上电按钮
-ROS2 -> PLC: 触发下电按钮
-ROS2 -> PLC: 触发上使能按钮
-ROS2 -> PLC: 触发下使能按钮
+ROS2 -> PLC: 保持上电请求，同时取消下电请求
+ROS2 -> PLC: 保持下电请求，同时取消上电请求
+ROS2 -> PLC: 保持上使能请求，同时取消下使能请求
+ROS2 -> PLC: 保持下使能请求，同时取消上使能请求
 PLC -> ROS2: 反馈上电是否就绪
 PLC -> ROS2: 反馈上使能是否就绪
 PLC -> ROS2: 反馈下电是否完成
 PLC -> ROS2: 反馈下使能是否完成
 ```
 
-这里“上电/下电/上使能/下使能”是四个独立按钮，不是同一个 Bool 的 True/False。
+这里“上电/下电/上使能/下使能”是四个独立请求位。上电和下电互斥，上使能和下使能互斥。
 
 ## 3. TIA Portal 必须设置
 
@@ -86,29 +86,35 @@ DB5.DBX9.0
 
 ## 4. PLC 程序建议
 
-### 4.1 ROS 请求位作为按钮脉冲
+### 4.1 ROS 请求位作为互斥保持信号
 
-ROS2 会把请求位短暂置为 `True`，默认保持 `0.2 秒`，然后自动置回 `False`。
+ROS2 不再发送短脉冲，而是保持请求位状态。
 
-所以 PLC 程序应把下面这些位当作按钮脉冲或上升沿：
-
-```text
-DB5.DBX8.0   上电按钮
-DB5.DBX8.1   下电按钮
-DB5.DBX8.2   上使能按钮
-DB5.DBX8.3   下使能按钮
-```
-
-建议 PLC 端用上升沿触发：
+上电/下电互斥：
 
 ```text
-DB5.DBX8.0 上升沿 -> 执行上电流程
-DB5.DBX8.1 上升沿 -> 执行下电流程
-DB5.DBX8.2 上升沿 -> 执行上使能流程
-DB5.DBX8.3 上升沿 -> 执行下使能流程
+请求上电时:
+DB5.DBX8.0 = True
+DB5.DBX8.1 = False
+
+请求下电时:
+DB5.DBX8.0 = False
+DB5.DBX8.1 = True
 ```
 
-不要要求这些位一直保持 True。
+上使能/下使能互斥：
+
+```text
+请求上使能时:
+DB5.DBX8.2 = True
+DB5.DBX8.3 = False
+
+请求下使能时:
+DB5.DBX8.2 = False
+DB5.DBX8.3 = True
+```
+
+PLC 程序可以直接按保持信号写逻辑，不需要必须做上升沿。
 
 ### 4.2 反馈位由 PLC 写入
 
@@ -176,7 +182,7 @@ Command/status byte: 8
 Disable feedback byte: 9
 ```
 
-### 5.1 推荐按钮式命令
+### 5.1 推荐命令
 
 请求上电：
 
@@ -216,10 +222,10 @@ ros2 service call /plc/set_enable std_srvs/srv/SetBool "{data: false}"
 对应关系：
 
 ```text
-set_power_on true    -> 触发 DB5.DBX8.0 上电按钮
-set_power_on false   -> 触发 DB5.DBX8.1 下电按钮
-set_enable true      -> 触发 DB5.DBX8.2 上使能按钮
-set_enable false     -> 触发 DB5.DBX8.3 下使能按钮
+set_power_on true    -> DB5.DBX8.0=True,  DB5.DBX8.1=False
+set_power_on false   -> DB5.DBX8.0=False, DB5.DBX8.1=True
+set_enable true      -> DB5.DBX8.2=True,  DB5.DBX8.3=False
+set_enable false     -> DB5.DBX8.2=False, DB5.DBX8.3=True
 ```
 
 ### 5.3 清空命令位
@@ -273,7 +279,8 @@ ros2 service call /plc/request_power_on std_srvs/srv/Trigger "{}"
 PLC 同学在线监控，应看到：
 
 ```text
-DB5.DBX8.0 短暂 True，然后自动回 False
+DB5.DBX8.0 = True
+DB5.DBX8.1 = False
 ```
 
 依次测试：
@@ -287,9 +294,17 @@ ros2 service call /plc/request_disable std_srvs/srv/Trigger "{}"
 PLC 同学应分别看到：
 
 ```text
-DB5.DBX8.1 短暂 True
-DB5.DBX8.2 短暂 True
-DB5.DBX8.3 短暂 True
+request_power_off:
+DB5.DBX8.0 = False
+DB5.DBX8.1 = True
+
+request_enable:
+DB5.DBX8.2 = True
+DB5.DBX8.3 = False
+
+request_disable:
+DB5.DBX8.2 = False
+DB5.DBX8.3 = True
 ```
 
 ### 6.2 测试 PLC 写 ROS
@@ -331,10 +346,10 @@ ROS2 应看到对应 topic 变成 True。
 
 ```text
 1. ROS2 能连接 PLC。
-2. request_power_on 能触发 DB5.DBX8.0 脉冲。
-3. request_power_off 能触发 DB5.DBX8.1 脉冲。
-4. request_enable 能触发 DB5.DBX8.2 脉冲。
-5. request_disable 能触发 DB5.DBX8.3 脉冲。
+2. request_power_on 后，DB5.DBX8.0=True，DB5.DBX8.1=False。
+3. request_power_off 后，DB5.DBX8.0=False，DB5.DBX8.1=True。
+4. request_enable 后，DB5.DBX8.2=True，DB5.DBX8.3=False。
+5. request_disable 后，DB5.DBX8.2=False，DB5.DBX8.3=True。
 6. PLC 写 DB5.DBX8.5 后，ROS2 /plc/power_on_ready 变化。
 7. PLC 写 DB5.DBX8.6 后，ROS2 /plc/enable_ready 变化。
 8. PLC 写 DB5.DBX8.7 后，ROS2 /plc/power_off_ready 变化。
