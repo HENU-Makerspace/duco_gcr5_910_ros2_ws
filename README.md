@@ -171,22 +171,19 @@ ros2 run plc_modbus_bridge plc_modbus_bridge --ros-args -p listen_port:=1502
 
 ## Siemens PLC S7 DB Bridge
 
-This bridge uses Siemens S7 communication through `python-snap7`. It is separate from Modbus TCP. Use it when the PLC program exposes command and status bits in `DB1`.
+This bridge uses Siemens S7 communication through `python-snap7`. It is separate from Modbus TCP. The current PLC program uses the existing `DB5` byte 8 bits.
 
 PLC side assumptions:
 
 ```text
 PLC IP: 192.168.6.1
-DB number: DB1
-DB1.DBX0.0  ROS command: robot power enable
-DB1.DBX0.1  ROS command: suction on
-DB1.DBX0.2  ROS command: suction release / blow-off
-DB1.DBX0.3  ROS command: alarm reset
-DB1.DBX1.0  PLC status: robot ready
-DB1.DBX1.1  PLC status: emergency stop
-DB1.DBX1.2  PLC status: suction output feedback
-DB1.DBX1.3  PLC status: object detected by vacuum switch
-DB1.DBX1.4  PLC status: PLC or air circuit alarm
+DB number: DB5
+DB5.DBX8.0  ROS command: request robot power-on
+DB5.DBX8.1  ROS command: request robot enable
+DB5.DBX8.2  ROS command: suction on, reserved for later
+DB5.DBX8.3  PLC status: power feedback ready
+DB5.DBX8.4  PLC status: enable feedback ready
+DB5.DBX8.5  PLC status: emergency stop triggered
 ```
 
 Detailed PLC-side implementation guide:
@@ -199,7 +196,7 @@ TIA Portal settings:
 
 ```text
 Enable PUT/GET communication access
-Disable optimized block access for DB1
+Disable optimized block access for DB5
 Use S7-1200 rack=0, slot=1
 ```
 
@@ -217,12 +214,14 @@ export PATH=/usr/bin:/bin:$PATH
 source /opt/ros/jazzy/setup.bash
 source install/setup.bash
 
-ros2 run plc_s7_bridge plc_s7_bridge --ros-args -p plc_ip:=192.168.6.1 -p db_number:=1
+ros2 run plc_s7_bridge plc_s7_bridge --ros-args -p plc_ip:=192.168.6.1
 ```
 
 Published topics:
 
 ```text
+/plc/power_ready           std_msgs/Bool
+/plc/enable_ready          std_msgs/Bool
 /plc/robot_ready            std_msgs/Bool
 /plc/e_stop                 std_msgs/Bool
 /plc/suction_on_feedback    std_msgs/Bool
@@ -234,6 +233,7 @@ Command services:
 
 ```bash
 ros2 service call /plc/set_power_on std_srvs/srv/SetBool "{data: true}"
+ros2 service call /plc/set_enable std_srvs/srv/SetBool "{data: true}"
 ros2 service call /plc/set_suction_on std_srvs/srv/SetBool "{data: true}"
 ros2 service call /plc/set_suction_release std_srvs/srv/SetBool "{data: true}"
 ros2 service call /plc/set_reset std_srvs/srv/SetBool "{data: true}"
