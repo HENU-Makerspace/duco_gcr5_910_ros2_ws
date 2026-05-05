@@ -178,12 +178,15 @@ PLC side assumptions:
 ```text
 PLC IP: 192.168.6.1
 DB number: DB5
-DB5.DBX8.0  ROS command: request robot power-on
-DB5.DBX8.1  ROS command: request robot enable
-DB5.DBX8.2  ROS command: suction on, reserved for later
-DB5.DBX8.3  PLC status: power feedback ready
-DB5.DBX8.4  PLC status: enable feedback ready
-DB5.DBX8.5  PLC status: emergency stop triggered
+DB5.DBX8.0  ROS command pulse: request robot power-on
+DB5.DBX8.1  ROS command pulse: request robot power-off
+DB5.DBX8.2  ROS command pulse: request robot enable
+DB5.DBX8.3  ROS command pulse: request robot disable
+DB5.DBX8.4  ROS command: suction on, reserved for later
+DB5.DBX8.5  PLC status: power-on feedback ready
+DB5.DBX8.6  PLC status: enable feedback ready
+DB5.DBX8.7  PLC status: power-off feedback ready
+DB5.DBX9.0  PLC status: disable feedback ready
 ```
 
 Detailed PLC-side implementation guide:
@@ -220,8 +223,11 @@ ros2 run plc_s7_bridge plc_s7_bridge --ros-args -p plc_ip:=192.168.6.1
 Published topics:
 
 ```text
+/plc/power_on_ready        std_msgs/Bool
 /plc/power_ready           std_msgs/Bool
 /plc/enable_ready          std_msgs/Bool
+/plc/power_off_ready       std_msgs/Bool
+/plc/disable_ready         std_msgs/Bool
 /plc/robot_ready            std_msgs/Bool
 /plc/e_stop                 std_msgs/Bool
 /plc/suction_on_feedback    std_msgs/Bool
@@ -232,8 +238,10 @@ Published topics:
 Command services:
 
 ```bash
-ros2 service call /plc/set_power_on std_srvs/srv/SetBool "{data: true}"
-ros2 service call /plc/set_enable std_srvs/srv/SetBool "{data: true}"
+ros2 service call /plc/request_power_on std_srvs/srv/Trigger "{}"
+ros2 service call /plc/request_power_off std_srvs/srv/Trigger "{}"
+ros2 service call /plc/request_enable std_srvs/srv/Trigger "{}"
+ros2 service call /plc/request_disable std_srvs/srv/Trigger "{}"
 ros2 service call /plc/set_suction_on std_srvs/srv/SetBool "{data: true}"
 ros2 service call /plc/set_suction_release std_srvs/srv/SetBool "{data: true}"
 ros2 service call /plc/set_reset std_srvs/srv/SetBool "{data: true}"

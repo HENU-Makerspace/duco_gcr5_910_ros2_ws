@@ -2,6 +2,7 @@
 """ROS 2 bridge for Siemens S7-1214C PLC DB bit control."""
 
 import threading
+import time
 from typing import Optional
 
 import rclpy
@@ -22,13 +23,16 @@ except ImportError as exc:
 class PlcS7Bridge(Node):
     """Connect ROS 2 to DB bits on a Siemens S7-1214C PLC.
 
-    Default mapping uses the PLC team's existing DB5 byte 8:
+    Default mapping uses the PLC team's existing DB5 byte 8/9:
       DB5.DBX8.0: ROS requests robot power-on
-      DB5.DBX8.1: ROS requests robot enable
-      DB5.DBX8.2: ROS requests suction on, reserved for later
-      DB5.DBX8.3: PLC reports power-on feedback ready
-      DB5.DBX8.4: PLC reports enable feedback ready
-      DB5.DBX8.5: PLC reports emergency stop triggered
+      DB5.DBX8.1: ROS requests robot power-off
+      DB5.DBX8.2: ROS requests robot enable
+      DB5.DBX8.3: ROS requests robot disable
+      DB5.DBX8.4: ROS requests suction on, reserved for later
+      DB5.DBX8.5: PLC reports power-on feedback ready
+      DB5.DBX8.6: PLC reports enable feedback ready
+      DB5.DBX8.7: PLC reports power-off feedback ready
+      DB5.DBX9.0: PLC reports disable feedback ready
 
     The DB number, byte offset, and bit offsets are parameters so the same node
     can be reused if the PLC program changes later.
@@ -42,12 +46,19 @@ class PlcS7Bridge(Node):
         self.declare_parameter("slot", 1)
         self.declare_parameter("db_number", 5)
         self.declare_parameter("io_byte", 8)
-        self.declare_parameter("power_request_bit", 0)
-        self.declare_parameter("enable_request_bit", 1)
-        self.declare_parameter("suction_request_bit", 2)
-        self.declare_parameter("power_ready_bit", 3)
-        self.declare_parameter("enable_ready_bit", 4)
-        self.declare_parameter("estop_bit", 5)
+        self.declare_parameter("power_on_request_bit", 0)
+        self.declare_parameter("power_off_request_bit", 1)
+        self.declare_parameter("enable_request_bit", 2)
+        self.declare_parameter("disable_request_bit", 3)
+        self.declare_parameter("suction_request_bit", 4)
+        self.declare_parameter("power_on_ready_bit", 5)
+        self.declare_parameter("enable_ready_bit", 6)
+        self.declare_parameter("power_off_ready_bit", 7)
+        self.declare_parameter("disable_ready_byte", 9)
+        self.declare_parameter("disable_ready_bit", 0)
+        self.declare_parameter("estop_byte", -1)
+        self.declare_parameter("estop_bit", -1)
+        self.declare_parameter("command_pulse_seconds", 0.2)
         self.declare_parameter("poll_period", 0.5)
         self.declare_parameter("auto_reconnect", True)
 
@@ -56,12 +67,21 @@ class PlcS7Bridge(Node):
         self.slot = int(self.get_parameter("slot").value)
         self.db_number = int(self.get_parameter("db_number").value)
         self.io_byte = int(self.get_parameter("io_byte").value)
-        self.power_request_bit = int(self.get_parameter("power_request_bit").value)
+        self.power_on_request_bit = int(self.get_parameter("power_on_request_bit").value)
+        self.power_off_request_bit = int(self.get_parameter("power_off_request_bit").value)
         self.enable_request_bit = int(self.get_parameter("enable_request_bit").value)
+        self.disable_request_bit = int(self.get_parameter("disable_request_bit").value)
         self.suction_request_bit = int(self.get_parameter("suction_request_bit").value)
-        self.power_ready_bit = int(self.get_parameter("power_ready_bit").value)
+        self.power_on_ready_bit = int(self.get_parameter("power_on_ready_bit").value)
         self.enable_ready_bit = int(self.get_parameter("enable_ready_bit").value)
+        self.power_off_ready_bit = int(self.get_parameter("power_off_ready_bit").value)
+        self.disable_ready_byte = int(self.get_parameter("disable_ready_byte").value)
+        self.disable_ready_bit = int(self.get_parameter("disable_ready_bit").value)
+        self.estop_byte = int(self.get_parameter("estop_byte").value)
         self.estop_bit = int(self.get_parameter("estop_bit").value)
+        self.command_pulse_seconds = float(
+            self.get_parameter("command_pulse_seconds").value
+        )
         self.auto_reconnect = bool(self.get_parameter("auto_reconnect").value)
 
         self._plc = snap7.client.Client()
@@ -74,16 +94,25 @@ class PlcS7Bridge(Node):
         self.plc_alarm: Optional[bool] = None
         self.power_ready: Optional[bool] = None
         self.enable_ready: Optional[bool] = None
+        self.power_off_ready: Optional[bool] = None
+        self.disable_ready: Optional[bool] = None
 
-        self.power_on_cmd = False
-        self.enable_cmd = False
+        self.power_on_request = False
+        self.power_off_request = False
+        self.enable_request = False
+        self.disable_request = False
         self.suction_on_cmd = False
         self.suction_release_cmd = False
         self.reset_cmd = False
 
         self.ready_pub = self.create_publisher(Bool, "plc/robot_ready", 10)
-        self.power_ready_pub = self.create_publisher(Bool, "plc/power_ready", 10)
+        self.power_ready_pub = self.create_publisher(Bool, "plc/power_on_ready", 10)
+        self.power_ready_alias_pub = self.create_publisher(Bool, "plc/power_ready", 10)
         self.enable_ready_pub = self.create_publisher(Bool, "plc/enable_ready", 10)
+        self.power_off_ready_pub = self.create_publisher(
+            Bool, "plc/power_off_ready", 10
+        )
+        self.disable_ready_pub = self.create_publisher(Bool, "plc/disable_ready", 10)
         self.estop_pub = self.create_publisher(Bool, "plc/e_stop", 10)
         self.suction_feedback_pub = self.create_publisher(
             Bool, "plc/suction_on_feedback", 10
@@ -95,6 +124,10 @@ class PlcS7Bridge(Node):
 
         self.create_service(SetBool, "plc/set_power_on", self._handle_set_power_on)
         self.create_service(SetBool, "plc/set_enable", self._handle_set_enable)
+        self.create_service(Trigger, "plc/request_power_on", self._handle_request_power_on)
+        self.create_service(Trigger, "plc/request_power_off", self._handle_request_power_off)
+        self.create_service(Trigger, "plc/request_enable", self._handle_request_enable)
+        self.create_service(Trigger, "plc/request_disable", self._handle_request_disable)
         self.create_service(SetBool, "plc/set_suction_on", self._handle_set_suction_on)
         self.create_service(
             SetBool, "plc/set_suction_release", self._handle_set_suction_release
@@ -120,7 +153,7 @@ class PlcS7Bridge(Node):
                 if self._plc.get_connected():
                     self.get_logger().info(
                         f"成功连接到 PLC: {self.plc_ip}, rack={self.rack}, slot={self.slot}, "
-                        f"DB{self.db_number}.DBX{self.io_byte}.0~7"
+                        f"DB{self.db_number}.DBX{self.io_byte}.0~DBX{self.disable_ready_byte}.0"
                     )
                     return True
             except Exception as exc:  # noqa: BLE001
@@ -138,14 +171,24 @@ class PlcS7Bridge(Node):
         return self.auto_reconnect and self._connect_to_plc()
 
     def _read_plc_status(self) -> None:
-        """Read one PLC I/O byte from the configured DB byte offset."""
+        """Read PLC feedback bits from DB5.DBB8 and DB5.DBB9."""
         try:
             with self._plc_lock:
-                data = self._plc.db_read(self.db_number, self.io_byte, 1)
+                status_len = max(self.io_byte, self.disable_ready_byte, self.estop_byte) - self.io_byte + 1
+                data = self._plc.db_read(self.db_number, self.io_byte, status_len)
 
-            power_ready = bool(get_bool(data, 0, self.power_ready_bit))
+            power_ready = bool(get_bool(data, 0, self.power_on_ready_bit))
             enable_ready = bool(get_bool(data, 0, self.enable_ready_bit))
-            estop_status = bool(get_bool(data, 0, self.estop_bit))
+            power_off_ready = bool(get_bool(data, 0, self.power_off_ready_bit))
+            disable_ready = bool(
+                get_bool(data, self.disable_ready_byte - self.io_byte, self.disable_ready_bit)
+            )
+            if self.estop_byte >= self.io_byte and self.estop_bit >= 0:
+                estop_status = bool(
+                    get_bool(data, self.estop_byte - self.io_byte, self.estop_bit)
+                )
+            else:
+                estop_status = False
             ready_status = power_ready and enable_ready and not estop_status
 
             # 当前阶段吸盘未接气泵，下面三个 topic 先保持 False，后续接气路再扩展。
@@ -157,6 +200,8 @@ class PlcS7Bridge(Node):
                 ready_status != self.robot_ready
                 or power_ready != self.power_ready
                 or enable_ready != self.enable_ready
+                or power_off_ready != self.power_off_ready
+                or disable_ready != self.disable_ready
                 or estop_status != self.e_stop
                 or suction_feedback != self.suction_feedback
                 or object_detected != self.object_detected
@@ -165,6 +210,8 @@ class PlcS7Bridge(Node):
                 self.robot_ready = ready_status
                 self.power_ready = power_ready
                 self.enable_ready = enable_ready
+                self.power_off_ready = power_off_ready
+                self.disable_ready = disable_ready
                 self.e_stop = estop_status
                 self.suction_feedback = suction_feedback
                 self.object_detected = object_detected
@@ -173,6 +220,8 @@ class PlcS7Bridge(Node):
                     "PLC 状态更新: "
                     f"上电反馈已就绪={self.power_ready}, "
                     f"使能反馈已就绪={self.enable_ready}, "
+                    f"下电反馈已就绪={self.power_off_ready}, "
+                    f"下使能反馈已就绪={self.disable_ready}, "
                     f"机械臂就绪={self.robot_ready}, "
                     f"急停={self.e_stop}, "
                     f"吸盘输出反馈={self.suction_feedback}, "
@@ -182,7 +231,10 @@ class PlcS7Bridge(Node):
 
             self.ready_pub.publish(Bool(data=ready_status))
             self.power_ready_pub.publish(Bool(data=power_ready))
+            self.power_ready_alias_pub.publish(Bool(data=power_ready))
             self.enable_ready_pub.publish(Bool(data=enable_ready))
+            self.power_off_ready_pub.publish(Bool(data=power_off_ready))
+            self.disable_ready_pub.publish(Bool(data=disable_ready))
             self.estop_pub.publish(Bool(data=estop_status))
             self.suction_feedback_pub.publish(Bool(data=suction_feedback))
             self.object_detected_pub.publish(Bool(data=object_detected))
@@ -191,14 +243,7 @@ class PlcS7Bridge(Node):
             self.get_logger().error(f"读取 PLC 状态失败: {exc}")
             self._mark_disconnected()
 
-    def _write_plc_command(
-        self,
-        power_on: bool,
-        enable: bool,
-        suction_on: bool,
-        suction_release: bool,
-        reset: bool,
-    ) -> bool:
+    def _write_plc_command_bits(self) -> bool:
         """Write command bits to the configured PLC I/O byte."""
         if not self._ensure_connected():
             self.get_logger().error("PLC 未连接，无法写入指令。")
@@ -207,23 +252,22 @@ class PlcS7Bridge(Node):
         try:
             with self._plc_lock:
                 data = self._plc.db_read(self.db_number, self.io_byte, 1)
-                set_bool(data, 0, self.power_request_bit, power_on)
-                set_bool(data, 0, self.enable_request_bit, enable)
-                set_bool(data, 0, self.suction_request_bit, suction_on)
+                set_bool(data, 0, self.power_on_request_bit, self.power_on_request)
+                set_bool(data, 0, self.power_off_request_bit, self.power_off_request)
+                set_bool(data, 0, self.enable_request_bit, self.enable_request)
+                set_bool(data, 0, self.disable_request_bit, self.disable_request)
+                set_bool(data, 0, self.suction_request_bit, self.suction_on_cmd)
                 self._plc.db_write(self.db_number, self.io_byte, data)
 
-            self.power_on_cmd = power_on
-            self.enable_cmd = enable
-            self.suction_on_cmd = suction_on
-            self.suction_release_cmd = suction_release
-            self.reset_cmd = reset
             self.get_logger().info(
                 "PLC 指令下发: "
-                f"请求上电={power_on}, "
-                f"请求使能={enable}, "
-                f"吸盘吸气={suction_on}, "
-                f"破真空/放气={suction_release}, "
-                f"复位={reset}, "
+                f"请求上电={self.power_on_request}, "
+                f"请求下电={self.power_off_request}, "
+                f"请求上使能={self.enable_request}, "
+                f"请求下使能={self.disable_request}, "
+                f"吸盘吸气={self.suction_on_cmd}, "
+                f"破真空/放气={self.suction_release_cmd}, "
+                f"复位={self.reset_cmd}, "
                 f"写入地址=DB{self.db_number}.DBB{self.io_byte}"
             )
             return True
@@ -232,38 +276,85 @@ class PlcS7Bridge(Node):
             self._mark_disconnected()
             return False
 
+    def _set_command_state(
+        self,
+        *,
+        power_on: Optional[bool] = None,
+        power_off: Optional[bool] = None,
+        enable: Optional[bool] = None,
+        disable: Optional[bool] = None,
+        suction_on: Optional[bool] = None,
+    ) -> bool:
+        if power_on is not None:
+            self.power_on_request = power_on
+        if power_off is not None:
+            self.power_off_request = power_off
+        if enable is not None:
+            self.enable_request = enable
+        if disable is not None:
+            self.disable_request = disable
+        if suction_on is not None:
+            self.suction_on_cmd = suction_on
+        return self._write_plc_command_bits()
+
+    def _pulse_command(self, command_name: str) -> bool:
+        true_args = {command_name: True}
+        false_args = {command_name: False}
+        if not self._set_command_state(**true_args):
+            return False
+        time.sleep(self.command_pulse_seconds)
+        return self._set_command_state(**false_args)
+
     def _handle_set_power_on(self, request: SetBool.Request, response: SetBool.Response):
-        ok = self._write_plc_command(
-            request.data,
-            self.enable_cmd,
-            self.suction_on_cmd,
-            self.suction_release_cmd,
-            self.reset_cmd,
-        )
+        ok = self._pulse_command("power_on" if request.data else "power_off")
         response.success = ok
-        response.message = "power_on command written" if ok else "failed to write power_on command"
+        response.message = (
+            "power_on pulse written" if request.data else "power_off pulse written"
+        ) if ok else "failed to write power command"
         return response
 
     def _handle_set_enable(self, request: SetBool.Request, response: SetBool.Response):
-        ok = self._write_plc_command(
-            self.power_on_cmd,
-            request.data,
-            self.suction_on_cmd,
-            self.suction_release_cmd,
-            self.reset_cmd,
-        )
+        ok = self._pulse_command("enable" if request.data else "disable")
         response.success = ok
-        response.message = "enable command written" if ok else "failed to write enable command"
+        response.message = (
+            "enable pulse written" if request.data else "disable pulse written"
+        ) if ok else "failed to write enable command"
+        return response
+
+    def _handle_request_power_on(
+        self, request: Trigger.Request, response: Trigger.Response
+    ):
+        del request
+        response.success = self._pulse_command("power_on")
+        response.message = "power_on pulse written" if response.success else "failed"
+        return response
+
+    def _handle_request_power_off(
+        self, request: Trigger.Request, response: Trigger.Response
+    ):
+        del request
+        response.success = self._pulse_command("power_off")
+        response.message = "power_off pulse written" if response.success else "failed"
+        return response
+
+    def _handle_request_enable(
+        self, request: Trigger.Request, response: Trigger.Response
+    ):
+        del request
+        response.success = self._pulse_command("enable")
+        response.message = "enable pulse written" if response.success else "failed"
+        return response
+
+    def _handle_request_disable(
+        self, request: Trigger.Request, response: Trigger.Response
+    ):
+        del request
+        response.success = self._pulse_command("disable")
+        response.message = "disable pulse written" if response.success else "failed"
         return response
 
     def _handle_set_suction_on(self, request: SetBool.Request, response: SetBool.Response):
-        ok = self._write_plc_command(
-            self.power_on_cmd,
-            self.enable_cmd,
-            request.data,
-            self.suction_release_cmd,
-            self.reset_cmd,
-        )
+        ok = self._set_command_state(suction_on=request.data)
         response.success = ok
         response.message = "suction_on command written" if ok else "failed to write suction_on command"
         return response
@@ -271,13 +362,8 @@ class PlcS7Bridge(Node):
     def _handle_set_suction_release(
         self, request: SetBool.Request, response: SetBool.Response
     ):
-        ok = self._write_plc_command(
-            self.power_on_cmd,
-            self.enable_cmd,
-            self.suction_on_cmd,
-            request.data,
-            self.reset_cmd,
-        )
+        self.suction_release_cmd = request.data
+        ok = self._write_plc_command_bits()
         response.success = ok
         response.message = (
             "suction_release command written"
@@ -287,20 +373,22 @@ class PlcS7Bridge(Node):
         return response
 
     def _handle_set_reset(self, request: SetBool.Request, response: SetBool.Response):
-        ok = self._write_plc_command(
-            self.power_on_cmd,
-            self.enable_cmd,
-            self.suction_on_cmd,
-            self.suction_release_cmd,
-            request.data,
-        )
+        self.reset_cmd = request.data
+        ok = self._write_plc_command_bits()
         response.success = ok
         response.message = "reset command written" if ok else "failed to write reset command"
         return response
 
     def _handle_clear_commands(self, request: Trigger.Request, response: Trigger.Response):
         del request
-        ok = self._write_plc_command(False, False, False, False, False)
+        self.power_on_request = False
+        self.power_off_request = False
+        self.enable_request = False
+        self.disable_request = False
+        self.suction_on_cmd = False
+        self.suction_release_cmd = False
+        self.reset_cmd = False
+        ok = self._write_plc_command_bits()
         response.success = ok
         response.message = "commands cleared" if ok else "failed to clear commands"
         return response

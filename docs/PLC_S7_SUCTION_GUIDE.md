@@ -1,271 +1,163 @@
 # Siemens S7-1214C PLC 与 ROS2 当前联调方案
 
-本文档给 PLC 同学使用。当前阶段只完成 **ROS2 与 PLC 通讯、机械臂上电、机械臂使能、就绪反馈、急停反馈**。
+本文档给 PLC 同学使用。当前阶段只完成 **ROS2 与 PLC 通讯、机械臂上电/下电、上使能/下使能、反馈状态读取**。
 
-PLC 同学已经在原有 DB 块中建立了变量，本阶段直接使用原来的 `DB5`，不需要再新建 `DB1`。
+PLC 同学已经在原有 `DB5` 中建立了变量，所以本阶段直接使用 `DB5`，不需要新建 `DB1`。
 
-目前虽然现场有吸盘和气泵，但吸盘还没有连接到气泵，所以本阶段 **不控制吸盘、不控制气泵、不做真空检测**。`DB5.DBX8.2` 先作为预留位保留，后续气路接好后再启用。
+目前吸盘还没有连接气泵，所以 `ros请求吸气` 只作为预留位，当前不要接气泵或电磁阀。
 
-## 1. 当前目标
+## 1. 当前 DB5 地址
+
+按 PLC 同学截图，当前地址如下：
+
+```text
+绝对地址      数据类型  变量含义
+DB5.DBD0     Real      in10x
+DB5.DBD4     Real      in10y
+DB5.DBX8.0   Bool      ros请求上电
+DB5.DBX8.1   Bool      ros请求下电
+DB5.DBX8.2   Bool      ros请求上使能
+DB5.DBX8.3   Bool      ros请求下使能
+DB5.DBX8.4   Bool      ros请求吸气，当前预留，暂时不用
+DB5.DBX8.5   Bool      PLC上电反馈已就绪
+DB5.DBX8.6   Bool      PLC上使能反馈已就绪
+DB5.DBX8.7   Bool      PLC下电反馈已就绪
+DB5.DBX9.0   Bool      PLC下使能反馈已就绪
+```
+
+注意：这两张截图里没有看到新的急停地址。ROS2 节点现在默认不读取急停位，`/plc/e_stop` 会保持 `False`。如果 PLC 同学后续给出急停地址，比如 `DB5.DBX9.1`，ROS2 启动时再加参数：
+
+```bash
+-p estop_byte:=9 -p estop_bit:=1
+```
+
+## 2. 当前目标
 
 当前要跑通的是：
 
 ```text
-ROS2 电脑 -> PLC: 请求机械臂上电
-ROS2 电脑 -> PLC: 请求机械臂使能
-PLC -> ROS2 电脑: 反馈机械臂上电就绪
-PLC -> ROS2 电脑: 反馈机械臂使能就绪
-PLC -> ROS2 电脑: 反馈急停是否触发
+ROS2 -> PLC: 触发上电按钮
+ROS2 -> PLC: 触发下电按钮
+ROS2 -> PLC: 触发上使能按钮
+ROS2 -> PLC: 触发下使能按钮
+PLC -> ROS2: 反馈上电是否就绪
+PLC -> ROS2: 反馈上使能是否就绪
+PLC -> ROS2: 反馈下电是否完成
+PLC -> ROS2: 反馈下使能是否完成
 ```
 
-暂时不做：
-
-```text
-吸盘吸气
-气泵启动
-破真空/放气
-真空压力检测
-吸住工件检测
-```
-
-## 2. 网络参数
-
-```text
-ROS2 电脑:     192.168.6.99
-PLC:           192.168.6.1
-机械臂控制柜:  192.168.6.4
-相机:          192.168.6.5
-PLC 编程电脑:  192.168.6.66
-子网掩码:      255.255.255.0
-```
-
-ROS2 使用 Siemens S7 通讯直接访问 PLC 的 `DB5`，PLC 侧 TCP 端口是 `102`。
+这里“上电/下电/上使能/下使能”是四个独立按钮，不是同一个 Bool 的 True/False。
 
 ## 3. TIA Portal 必须设置
 
-### 3.1 设置 PLC IP
+### 3.1 PLC 网络
 
 ```text
-IP 地址:   192.168.6.1
-子网掩码: 255.255.255.0
+PLC IP:      192.168.6.1
+ROS2 电脑:   192.168.6.99
+子网掩码:    255.255.255.0
 ```
 
 ### 3.2 开启 PUT/GET 通讯
 
-打开 PLC 设备属性，在保护/连接机制相关页面中勾选：
+在 PLC 设备属性中勾选：
 
 ```text
 允许来自远程对象的 PUT/GET 通信访问
 ```
 
-如果不勾选，ROS2 可能可以 ping 通 PLC，但无法读写 DB。
+### 3.3 DB5 关闭优化块访问
 
-### 3.3 检查 DB5 的访问方式
-
-PLC 同学使用的是原来的 `DB5`，可以，不需要新建 DB。
-
-但必须确认 `DB5` 支持绝对地址访问。也就是右键 `DB5`，打开属性，取消勾选：
+右键 `DB5`，打开属性，取消勾选：
 
 ```text
 优化的块访问
 ```
 
-ROS2 程序按绝对地址访问，例如：
+ROS2 是按绝对地址访问的，例如：
 
 ```text
 DB5.DBX8.0
 DB5.DBX8.1
-DB5.DBX8.5
+DB5.DBX9.0
 ```
 
-如果 DB5 开启优化访问，绝对地址可能不可用或地址不固定。
+如果 `DB5` 开启优化访问，绝对地址可能不可用。
 
-## 4. DB5 数据类型与地址
+## 4. PLC 程序建议
 
-当前阶段只需要 `Bool` 类型。上电、使能、急停、就绪都是开关量，不是 `Int`，也不是浮点型。
+### 4.1 ROS 请求位作为按钮脉冲
 
-PLC 同学当前截图中的地址是：
+ROS2 会把请求位短暂置为 `True`，默认保持 `0.2 秒`，然后自动置回 `False`。
+
+所以 PLC 程序应把下面这些位当作按钮脉冲或上升沿：
 
 ```text
-绝对地址      数据类型  变量含义
-DB5.DBX8.0   Bool      ros请求上电
-DB5.DBX8.1   Bool      ros请求使能
-DB5.DBX8.2   Bool      ros请求吸气，当前预留，不接气泵
-DB5.DBX8.3   Bool      PLC上电反馈已就绪
-DB5.DBX8.4   Bool      PLC使能反馈已就绪
-DB5.DBX8.5   Bool      PLC反馈急停触发
+DB5.DBX8.0   上电按钮
+DB5.DBX8.1   下电按钮
+DB5.DBX8.2   上使能按钮
+DB5.DBX8.3   下使能按钮
 ```
 
-### 4.1 ROS2 写入 PLC 的命令位
+建议 PLC 端用上升沿触发：
 
 ```text
-DB5.DBX8.0   ROS2 写入   请求机械臂上电
-DB5.DBX8.1   ROS2 写入   请求机械臂使能
-DB5.DBX8.2   ROS2 写入   预留吸盘吸气，当前不要接气泵
+DB5.DBX8.0 上升沿 -> 执行上电流程
+DB5.DBX8.1 上升沿 -> 执行下电流程
+DB5.DBX8.2 上升沿 -> 执行上使能流程
+DB5.DBX8.3 上升沿 -> 执行下使能流程
 ```
 
-### 4.2 PLC 写给 ROS2 的状态位
+不要要求这些位一直保持 True。
+
+### 4.2 反馈位由 PLC 写入
+
+PLC 根据现场实际状态写反馈：
 
 ```text
-DB5.DBX8.3   PLC 写入    上电反馈已就绪
-DB5.DBX8.4   PLC 写入    使能反馈已就绪
-DB5.DBX8.5   PLC 写入    急停触发
+DB5.DBX8.5 = 上电完成/上电就绪
+DB5.DBX8.6 = 上使能完成/使能就绪
+DB5.DBX8.7 = 下电完成/下电就绪
+DB5.DBX9.0 = 下使能完成/下使能就绪
 ```
 
-### 4.3 关于同一个 Byte 的注意事项
+ROS2 只读取这些反馈，不应该写这些反馈位。
 
-现在命令位和反馈位都在 `DB5.DBB8` 这个同一个字节里：
+### 4.3 当前吸盘位不要接输出
 
-```text
-DB5.DBX8.0 ~ DB5.DBX8.2  ROS2 写
-DB5.DBX8.3 ~ DB5.DBX8.5  PLC 写
-```
-
-这个可以先联调。ROS2 节点写命令时会先读取 `DB5.DBB8` 当前值，再只修改 8.0、8.1、8.2，尽量保留 8.3、8.4、8.5。
-
-但从工业项目习惯来说，更推荐后续改成两个字节：
+当前不要把这个位接到气泵：
 
 ```text
-DB5.DBB8   ROS2 -> PLC 命令
-DB5.DBB9   PLC -> ROS2 状态
-```
-
-当前先按 PLC 同学已经建好的 `DB5.DBX8.x` 方案联调即可。
-
-## 5. 当前阶段推荐 PLC 物理 I/O
-
-实际 I/O 地址按现场接线为准。下面是推荐最小方案。
-
-```text
-I0.0   robot_power_ready_input    机械臂上电就绪反馈
-I0.1   robot_enable_ready_input   机械臂使能就绪反馈
-I0.2   estop_input                急停反馈，True 表示急停触发
-
-Q0.0   robot_power_output         机械臂上电输出或上电继电器
-Q0.1   robot_enable_output        机械臂使能输出或使能继电器
-```
-
-当前不要接：
-
-```text
-Q0.2   吸盘吸气
-Q0.3   破真空/放气
-```
-
-这些后续气路接好后再做。
-
-## 6. PLC 梯形图逻辑
-
-下面是当前最小逻辑。变量名可以按项目习惯改，但 DB 地址要保持一致。
-
-### 6.1 网络 1：急停反馈
-
-假设急停输入 `I0.2=True` 表示急停触发：
-
-```text
-DB5.DBX8.5 = I0.2
-```
-
-如果现场急停输入是常闭信号，也就是断开才表示急停，PLC 同学需要按实际电气逻辑取反。
-
-### 6.2 网络 2：机械臂上电输出
-
-```text
-Q0.0 = DB5.DBX8.0 AND NOT DB5.DBX8.5
-```
-
-含义：
-
-```text
-ROS2 请求上电
-并且急停没有触发
-PLC 才允许上电输出
-```
-
-不要写成：
-
-```text
-Q0.0 = DB5.DBX8.0
-```
-
-急停必须能切断输出。
-
-### 6.3 网络 3：机械臂使能输出
-
-建议使能必须建立在已请求上电、且没有急停的基础上：
-
-```text
-Q0.1 = DB5.DBX8.1 AND DB5.DBX8.0 AND NOT DB5.DBX8.5
-```
-
-含义：
-
-```text
-ROS2 请求使能
-ROS2 请求上电仍然为 True
-急停没有触发
-PLC 才允许使能输出
-```
-
-如果现场还要求“上电反馈已就绪后才允许使能”，可以用更严格逻辑：
-
-```text
-Q0.1 = DB5.DBX8.1 AND DB5.DBX8.3 AND NOT DB5.DBX8.5
-```
-
-这更推荐。
-
-### 6.4 网络 4：上电反馈已就绪
-
-如果已经接了真实上电就绪反馈 `I0.0`，用正式逻辑：
-
-```text
-DB5.DBX8.3 = I0.0 AND Q0.0 AND NOT DB5.DBX8.5
-```
-
-如果暂时没有真实上电反馈线，可以先用临时联调逻辑：
-
-```text
-DB5.DBX8.3 = Q0.0 AND NOT DB5.DBX8.5
-```
-
-临时逻辑只表示 PLC 输出打开，不代表机械臂控制柜真的上电就绪。
-
-### 6.5 网络 5：使能反馈已就绪
-
-如果已经接了真实使能就绪反馈 `I0.1`，用正式逻辑：
-
-```text
-DB5.DBX8.4 = I0.1 AND Q0.1 AND NOT DB5.DBX8.5
-```
-
-如果暂时没有真实使能反馈线，可以先用临时联调逻辑：
-
-```text
-DB5.DBX8.4 = Q0.1 AND NOT DB5.DBX8.5
-```
-
-临时逻辑只表示 PLC 使能输出打开，不代表机械臂真的使能就绪。
-
-### 6.6 网络 6：吸盘命令暂时不处理
-
-当前不要把下面这个位接到气泵或电磁阀：
-
-```text
-DB5.DBX8.2
+DB5.DBX8.4
 ```
 
 也就是当前不要写：
 
 ```text
-Q0.2 = DB5.DBX8.2
+Q0.x = DB5.DBX8.4
 ```
 
-等吸盘和气泵接好后，再新增吸气、放气、真空检测逻辑。
+等吸盘和气泵接好后再启用。
 
-## 7. ROS2 侧当前使用命令
+### 4.4 急停
 
-启动 ROS2 PLC 通讯节点：
+急停应在 PLC 硬件/安全逻辑里切断输出。
+
+如果希望 ROS2 也能读取急停状态，请 PLC 同学再提供一个明确 DB 地址，例如：
+
+```text
+DB5.DBX9.1   PLC反馈急停触发
+```
+
+然后 ROS2 这边启动时加：
+
+```bash
+-p estop_byte:=9 -p estop_bit:=1
+```
+
+## 5. ROS2 使用命令
+
+启动 PLC 通讯节点：
 
 ```bash
 cd /home/me/duco_ros2_ws
@@ -276,288 +168,183 @@ source install/setup.bash
 ros2 run plc_s7_bridge plc_s7_bridge --ros-args -p plc_ip:=192.168.6.1
 ```
 
-节点默认使用：
+默认映射：
 
 ```text
 DB number: 5
-Byte:      8
+Command/status byte: 8
+Disable feedback byte: 9
 ```
 
-如果想显式写出来，也可以运行：
+### 5.1 推荐按钮式命令
+
+请求上电：
 
 ```bash
-ros2 run plc_s7_bridge plc_s7_bridge --ros-args \
-  -p plc_ip:=192.168.6.1 \
-  -p db_number:=5 \
-  -p io_byte:=8
+ros2 service call /plc/request_power_on std_srvs/srv/Trigger "{}"
 ```
 
-### 7.1 请求上电
+请求下电：
+
+```bash
+ros2 service call /plc/request_power_off std_srvs/srv/Trigger "{}"
+```
+
+请求上使能：
+
+```bash
+ros2 service call /plc/request_enable std_srvs/srv/Trigger "{}"
+```
+
+请求下使能：
+
+```bash
+ros2 service call /plc/request_disable std_srvs/srv/Trigger "{}"
+```
+
+### 5.2 兼容旧命令
+
+旧命令仍可用：
 
 ```bash
 ros2 service call /plc/set_power_on std_srvs/srv/SetBool "{data: true}"
-```
-
-对应 PLC：
-
-```text
-DB5.DBX8.0 = True
-```
-
-取消上电请求：
-
-```bash
 ros2 service call /plc/set_power_on std_srvs/srv/SetBool "{data: false}"
-```
-
-对应 PLC：
-
-```text
-DB5.DBX8.0 = False
-```
-
-### 7.2 请求使能
-
-```bash
 ros2 service call /plc/set_enable std_srvs/srv/SetBool "{data: true}"
-```
-
-对应 PLC：
-
-```text
-DB5.DBX8.1 = True
-```
-
-取消使能请求：
-
-```bash
 ros2 service call /plc/set_enable std_srvs/srv/SetBool "{data: false}"
 ```
 
-对应 PLC：
+对应关系：
 
 ```text
-DB5.DBX8.1 = False
+set_power_on true    -> 触发 DB5.DBX8.0 上电按钮
+set_power_on false   -> 触发 DB5.DBX8.1 下电按钮
+set_enable true      -> 触发 DB5.DBX8.2 上使能按钮
+set_enable false     -> 触发 DB5.DBX8.3 下使能按钮
 ```
 
-### 7.3 清空命令
+### 5.3 清空命令位
 
 ```bash
 ros2 service call /plc/clear_commands std_srvs/srv/Trigger "{}"
 ```
 
-对应 PLC：
+会清空：
 
 ```text
 DB5.DBX8.0 = False
 DB5.DBX8.1 = False
 DB5.DBX8.2 = False
+DB5.DBX8.3 = False
+DB5.DBX8.4 = False
 ```
 
-### 7.4 查看状态
+### 5.4 查看反馈状态
 
 ```bash
-ros2 topic echo /plc/power_ready
+ros2 topic echo /plc/power_on_ready
 ros2 topic echo /plc/enable_ready
+ros2 topic echo /plc/power_off_ready
+ros2 topic echo /plc/disable_ready
 ros2 topic echo /plc/robot_ready
-ros2 topic echo /plc/e_stop
 ```
 
-含义：
+对应关系：
 
 ```text
-/plc/power_ready   对应 DB5.DBX8.3
-/plc/enable_ready  对应 DB5.DBX8.4
-/plc/e_stop        对应 DB5.DBX8.5
-/plc/robot_ready   等于 power_ready AND enable_ready AND NOT e_stop
+/plc/power_on_ready   = DB5.DBX8.5
+/plc/enable_ready     = DB5.DBX8.6
+/plc/power_off_ready  = DB5.DBX8.7
+/plc/disable_ready    = DB5.DBX9.0
+/plc/robot_ready      = power_on_ready AND enable_ready AND NOT e_stop
 ```
 
-当前阶段不要使用吸盘命令：
+如果没有配置急停地址，`e_stop` 默认为 False。
+
+## 6. 联调步骤
+
+### 6.1 测试 ROS 写 PLC
+
+ROS2 发送：
 
 ```bash
-ros2 service call /plc/set_suction_on std_srvs/srv/SetBool "{data: true}"
-ros2 service call /plc/set_gripper_close std_srvs/srv/SetBool "{data: true}"
+ros2 service call /plc/request_power_on std_srvs/srv/Trigger "{}"
 ```
 
-## 8. 联调步骤
+PLC 同学在线监控，应看到：
 
-### 8.1 检查网络
+```text
+DB5.DBX8.0 短暂 True，然后自动回 False
+```
 
-ROS2 电脑检查：
+依次测试：
 
 ```bash
-ping -c 3 192.168.6.1
-nc -vz -w 2 192.168.6.1 102
+ros2 service call /plc/request_power_off std_srvs/srv/Trigger "{}"
+ros2 service call /plc/request_enable std_srvs/srv/Trigger "{}"
+ros2 service call /plc/request_disable std_srvs/srv/Trigger "{}"
 ```
 
-期望：
+PLC 同学应分别看到：
 
 ```text
-ping 192.168.6.1 正常
-102 端口连接成功
+DB5.DBX8.1 短暂 True
+DB5.DBX8.2 短暂 True
+DB5.DBX8.3 短暂 True
 ```
 
-### 8.2 检查 ROS2 是否能连接 PLC
+### 6.2 测试 PLC 写 ROS
 
-ROS2 电脑运行：
-
-```bash
-ros2 run plc_s7_bridge plc_s7_bridge --ros-args -p plc_ip:=192.168.6.1
-```
-
-期望日志：
-
-```text
-成功连接到 PLC: 192.168.6.1, rack=0, slot=1, DB5.DBX8.0~7
-PLC 状态更新: 上电反馈已就绪=False, 使能反馈已就绪=False, 机械臂就绪=False, 急停=False
-```
-
-如果连接失败，PLC 同学检查：
-
-```text
-PLC IP 是否为 192.168.6.1
-PUT/GET 是否开启
-DB5 是否存在
-DB5 是否关闭优化块访问
-PLC 是否已经下载最新程序
-```
-
-### 8.3 测试 ROS2 写 DB5
-
-ROS2 执行：
-
-```bash
-ros2 service call /plc/set_power_on std_srvs/srv/SetBool "{data: true}"
-```
-
-PLC 同学在线监控，确认：
-
-```text
-DB5.DBX8.0 = True
-```
-
-ROS2 执行：
-
-```bash
-ros2 service call /plc/set_enable std_srvs/srv/SetBool "{data: true}"
-```
-
-PLC 同学确认：
-
-```text
-DB5.DBX8.1 = True
-```
-
-清空命令：
-
-```bash
-ros2 service call /plc/clear_commands std_srvs/srv/Trigger "{}"
-```
-
-PLC 同学确认：
-
-```text
-DB5.DBX8.0 = False
-DB5.DBX8.1 = False
-DB5.DBX8.2 = False
-```
-
-### 8.4 测试 PLC 输出
-
-确认现场安全后，ROS2 执行：
-
-```bash
-ros2 service call /plc/set_power_on std_srvs/srv/SetBool "{data: true}"
-```
-
-PLC 同学确认：
-
-```text
-Q0.0 = True
-DB5.DBX8.3 = True
-```
-
-然后 ROS2 执行：
-
-```bash
-ros2 service call /plc/set_enable std_srvs/srv/SetBool "{data: true}"
-```
-
-PLC 同学确认：
-
-```text
-Q0.1 = True
-DB5.DBX8.4 = True
-```
-
-### 8.5 测试急停
-
-触发急停后，PLC 同学确认：
+PLC 同学手动或程序置位：
 
 ```text
 DB5.DBX8.5 = True
-Q0.0 = False
-Q0.1 = False
+DB5.DBX8.6 = True
+DB5.DBX8.7 = True
+DB5.DBX9.0 = True
 ```
 
-ROS2 电脑确认：
+ROS2 应看到对应 topic 变成 True。
 
-```bash
-ros2 topic echo /plc/e_stop
-```
+### 6.3 真实动作顺序
 
-应看到：
+建议顺序：
 
 ```text
-data: true
+1. request_power_on
+2. 等 /plc/power_on_ready=True
+3. request_enable
+4. 等 /plc/enable_ready=True
+5. 确认 /plc/robot_ready=True
+6. 再启动机械臂 MoveIt 控制
 ```
 
-释放急停后，PLC 同学确认：
+停止顺序：
 
 ```text
-DB5.DBX8.5 = False
+1. request_disable
+2. 等 /plc/disable_ready=True
+3. request_power_off
+4. 等 /plc/power_off_ready=True
 ```
 
-### 8.6 确认 ready
-
-当：
-
-```text
-DB5.DBX8.3 = True
-DB5.DBX8.4 = True
-DB5.DBX8.5 = False
-```
-
-ROS2 应看到：
-
-```text
-/plc/power_ready = True
-/plc/enable_ready = True
-/plc/e_stop = False
-/plc/robot_ready = True
-```
-
-只有在 `/plc/robot_ready=True` 且 `/plc/e_stop=False` 后，才允许启动机械臂 MoveIt 控制。
-
-## 9. 当前阶段通过标准
-
-本阶段联调通过，需要满足：
+## 7. 通过标准
 
 ```text
 1. ROS2 能连接 PLC。
-2. ROS2 发送 set_power_on true 后，DB5.DBX8.0=True。
-3. ROS2 发送 set_enable true 后，DB5.DBX8.1=True。
-4. 清空命令后，DB5.DBX8.0/8.1/8.2=False。
-5. 急停触发时，DB5.DBX8.5=True，Q0.0=False，Q0.1=False。
-6. 上电就绪时，DB5.DBX8.3=True。
-7. 使能就绪时，DB5.DBX8.4=True。
-8. ROS2 能通过 /plc/power_ready、/plc/enable_ready、/plc/e_stop、/plc/robot_ready 看到状态。
+2. request_power_on 能触发 DB5.DBX8.0 脉冲。
+3. request_power_off 能触发 DB5.DBX8.1 脉冲。
+4. request_enable 能触发 DB5.DBX8.2 脉冲。
+5. request_disable 能触发 DB5.DBX8.3 脉冲。
+6. PLC 写 DB5.DBX8.5 后，ROS2 /plc/power_on_ready 变化。
+7. PLC 写 DB5.DBX8.6 后，ROS2 /plc/enable_ready 变化。
+8. PLC 写 DB5.DBX8.7 后，ROS2 /plc/power_off_ready 变化。
+9. PLC 写 DB5.DBX9.0 后，ROS2 /plc/disable_ready 变化。
 ```
 
-## 10. 安全注意事项
+## 8. 安全注意事项
 
-1. ROS2 只负责写 DB 请求，PLC 必须负责安全互锁。
-2. 急停必须能硬件切断机械臂上电和使能输出。
-3. 当前阶段不要把吸盘、气泵、电磁阀接到 `DB5.DBX8.2`。
-4. 第一次控制输出前，现场人员必须确认机械臂周围安全。
+1. ROS2 只发请求，PLC 必须负责安全互锁。
+2. 急停必须能硬件切断机械臂输出，不能只靠 ROS2 软件。
+3. 当前阶段不要把吸盘、气泵、电磁阀接到 `DB5.DBX8.4`。
+4. 第一次动作前，现场人员必须确认机械臂周围安全。
 5. 第一次真实运动时，机械臂速度建议限制在 10% 左右。
