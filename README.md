@@ -179,9 +179,20 @@ PLC side assumptions:
 PLC IP: 192.168.6.1
 DB number: DB1
 DB1.DBX0.0  ROS command: robot power enable
-DB1.DBX0.1  ROS command: gripper close
+DB1.DBX0.1  ROS command: suction on
+DB1.DBX0.2  ROS command: suction release / blow-off
+DB1.DBX0.3  ROS command: alarm reset
 DB1.DBX1.0  PLC status: robot ready
 DB1.DBX1.1  PLC status: emergency stop
+DB1.DBX1.2  PLC status: suction output feedback
+DB1.DBX1.3  PLC status: object detected by vacuum switch
+DB1.DBX1.4  PLC status: PLC or air circuit alarm
+```
+
+Detailed PLC-side implementation guide:
+
+```text
+docs/PLC_S7_SUCTION_GUIDE.md
 ```
 
 TIA Portal settings:
@@ -212,17 +223,24 @@ ros2 run plc_s7_bridge plc_s7_bridge --ros-args -p plc_ip:=192.168.6.1 -p db_num
 Published topics:
 
 ```text
-/plc/robot_ready  std_msgs/Bool
-/plc/e_stop       std_msgs/Bool
+/plc/robot_ready            std_msgs/Bool
+/plc/e_stop                 std_msgs/Bool
+/plc/suction_on_feedback    std_msgs/Bool
+/plc/object_detected        std_msgs/Bool
+/plc/plc_alarm              std_msgs/Bool
 ```
 
 Command services:
 
 ```bash
 ros2 service call /plc/set_power_on std_srvs/srv/SetBool "{data: true}"
-ros2 service call /plc/set_gripper_close std_srvs/srv/SetBool "{data: true}"
+ros2 service call /plc/set_suction_on std_srvs/srv/SetBool "{data: true}"
+ros2 service call /plc/set_suction_release std_srvs/srv/SetBool "{data: true}"
+ros2 service call /plc/set_reset std_srvs/srv/SetBool "{data: true}"
 ros2 service call /plc/clear_commands std_srvs/srv/Trigger "{}"
 ```
+
+The old `/plc/set_gripper_close` service is still available for compatibility, and now maps to suction-on.
 
 ## Notes
 
