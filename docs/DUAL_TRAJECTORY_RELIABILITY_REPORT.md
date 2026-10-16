@@ -235,6 +235,7 @@ Phase B 中“仍有 Gazebo 目标未决”会先于“机器人故障”成为�
 6. **回调组**：节点未创建自定义回调组，全部使用默认互斥组；`state_mutex_` 为防御性措施。
 7. **lint**：未清理（见 §6），含 6 项落在新文件上。
 8. 数字孪生的 Phase A 走的是 `digital_twin_real.launch.py` 的 `use_real_robot:=false` 路径（`publish_real=false`）；带 `publish_real=true` 的完整装配（含 MoveIt 规划 + 真实门控）未作为一个 launch 组合整体运行，而是拆成 Phase A 与 Phase B/C 分别验证。
+9. **启动竞态（运行注意）**：该 launch 用 5 s 定时器启动 Gazebo 控制器，而 `DualTrajectoryAction` 的前端动作服务器更早就绪。若在 Gazebo 动作服务器就绪前下发目标，`handle_goal` 会因为 `sim_action_client_->action_server_is_ready()` 为假而**拒绝**（日志："Gazebo action server [...] is not ready"）。这是安全的拒绝（不产生任何运动），但操作上应在控制器就绪后再下发。验证脚本已改为等待 `/sim_arm_1_controller/follow_joint_trajectory` 出现，并对首个目标做有限重试。
 
 ---
 
@@ -292,10 +293,18 @@ $ git diff --stat b47d3e2..HEAD
 
 ## 附录：复现说明
 
-数字孪生验证（Phase A/B/C）使用一次性 rclpy 脚本与隔离的 ROS 域（`ROS_DOMAIN_ID=77`、`ROS_LOCALHOST_ONLY=1`）完成，**未随本仓库提交**。复现的关键步骤：
+数字孪生验证（Phase A/B/C）已脚本化，随仓库提交在 `scripts/dual_twin_verification/`：
 
-1. Phase A：`ros2 launch duco_gcr5_910_moveit_config digital_twin_real.launch.py use_real_robot:=false use_rviz:=false wait_for_real:=false`（headless），再向 `/arm_1_controller/follow_joint_trajectory` 发送一条 3 点轨迹，核对 `/joint_states` 实际变化。
-2. Phase B/C：在 Phase A 的 Gazebo 基础上，另起一个重命名节点实例（`publish_real:=true`、`wait_for_real:=true`，真实主题/服务全部改名为 `/twin_*`），用脚本以 50 Hz 发布合成的 `FollowJointTrajectory` 反馈与 `DucoRobotState` 状态，并按场景调用 `/twin_clear_fault`。
+```bash
+# 一键运行 A/B/C 三个阶段（结束时自动清理，退出码 0 表示全部通过）
+scripts/dual_twin_verification/verify_all.sh
+```
 
-若需要，可将这些验证脚本一并提交，以便回归时重复执行。
+- 隔离域 `ROS_DOMAIN_ID=77` + `ROS_LOCALHOST_ONLY=1`；不启动任何真机驱动。
+- Phase B/C 中节点实例的真实话题与服务全部改名为测试专用名
+  （`/twin_joint_path_command`、`/twin_real_feedback`、`/twin_robot_state`、`/twin_clear_fault`），
+  节点发出的“真实命令”进入**无人订阅**的话题，因此不可能驱动真机。
+- 脚本、分阶段用法与已知限制见 `scripts/dual_twin_verification/README.md`。
+
+实测（`verify_all.sh`）：Phase A 5/5、Phase B 22/22、Phase C 8/8，退出码 0。
 
