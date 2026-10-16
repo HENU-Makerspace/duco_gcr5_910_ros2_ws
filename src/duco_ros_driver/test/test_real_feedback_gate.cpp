@@ -86,6 +86,22 @@ TEST(RealFeedbackGate, VerdictNamesAreStable)
     duco_reliability::feedbackVerdictName(FeedbackVerdict::StaleFeedback), "stale_feedback");
   EXPECT_STREQ(
     duco_reliability::feedbackVerdictName(FeedbackVerdict::UnhealthyStatus), "unhealthy_status");
+  EXPECT_STREQ(
+    duco_reliability::feedbackVerdictName(FeedbackVerdict::InvalidFeedbackDimensions),
+    "invalid_feedback_dimensions");
+  EXPECT_STREQ(
+    duco_reliability::feedbackVerdictName(FeedbackVerdict::EmptyJointName), "empty_joint_name");
+  EXPECT_STREQ(
+    duco_reliability::feedbackVerdictName(FeedbackVerdict::DuplicateJointName),
+    "duplicate_joint_name");
+  EXPECT_STREQ(
+    duco_reliability::feedbackVerdictName(FeedbackVerdict::NonFinitePosition),
+    "non_finite_position");
+  EXPECT_STREQ(
+    duco_reliability::feedbackVerdictName(FeedbackVerdict::NonFiniteVelocity),
+    "non_finite_velocity");
+  EXPECT_STREQ(
+    duco_reliability::feedbackVerdictName(FeedbackVerdict::MissingJoint), "missing_joint");
 }
 
 // ---------------------------------------------------------------------------
@@ -143,12 +159,12 @@ TEST(RealFeedbackGate, NaNAndInfPositionsAreRejected)
   {
     Scenario s;
     s.feedback.positions[0] = kNaN;
-    EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedback);
+    EXPECT_EQ(s.evaluate(), FeedbackVerdict::NonFinitePosition);
   }
   {
     Scenario s;
     s.feedback.positions[1] = kInf;
-    EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedback);
+    EXPECT_EQ(s.evaluate(), FeedbackVerdict::NonFinitePosition);
   }
 }
 
@@ -159,12 +175,12 @@ TEST(RealFeedbackGate, NaNAndInfVelocitiesAreRejected)
   {
     Scenario s;
     s.feedback.velocities[0] = kNaN;
-    EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedback);
+    EXPECT_EQ(s.evaluate(), FeedbackVerdict::NonFiniteVelocity);
   }
   {
     Scenario s;
     s.feedback.velocities[1] = -kInf;
-    EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedback);
+    EXPECT_EQ(s.evaluate(), FeedbackVerdict::NonFiniteVelocity);
   }
 }
 
@@ -172,39 +188,89 @@ TEST(RealFeedbackGate, NaNAndInfVelocitiesAreRejected)
 // Feedback payload shape
 // ---------------------------------------------------------------------------
 
-TEST(RealFeedbackGate, MissingVelocitiesAreRejected)
+TEST(RealFeedbackGate, MissingVelocitiesAreRejectedWhenVelocityIsRequired)
 {
   Scenario s;
   s.feedback.velocities.clear();
-  EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedback);
+  EXPECT_TRUE(s.policy.require_velocity);
+  EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedbackDimensions);
+}
+
+TEST(RealFeedbackGate, MissingVelocitiesAreNotTreatedAsZeroVelocity)
+{
+  // A missing array must never be read as "the arm is stationary".  With
+  // velocity disabled the position test still applies, but the verdict carries
+  // no velocity evidence; with velocity required the sample is rejected.
+  Scenario s;
+  s.feedback.velocities.clear();
+  s.policy.require_velocity = false;
+  EXPECT_EQ(s.evaluate(), FeedbackVerdict::Reached);
+
+  Scenario required;
+  required.feedback.velocities.clear();
+  EXPECT_EQ(required.evaluate(), FeedbackVerdict::InvalidFeedbackDimensions);
+}
+
+TEST(RealFeedbackGate, PartialVelocityArrayIsRejectedEvenWhenVelocityIsOptional)
+{
+  Scenario s;
+  s.policy.require_velocity = false;
+  s.feedback.velocities = {0.0};
+  EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedbackDimensions);
+}
+
+TEST(RealFeedbackGate, NonFiniteVelocityIsRejectedEvenWhenVelocityIsOptional)
+{
+  Scenario s;
+  s.policy.require_velocity = false;
+  s.feedback.velocities[1] = kNaN;
+  EXPECT_EQ(s.evaluate(), FeedbackVerdict::NonFiniteVelocity);
 }
 
 TEST(RealFeedbackGate, EmptyJointNamesAreRejected)
 {
   Scenario s;
   s.feedback.joint_names.clear();
-  EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedback);
+  EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedbackDimensions);
 }
 
 TEST(RealFeedbackGate, DuplicateFeedbackJointNamesAreRejected)
 {
   Scenario s;
   s.feedback.joint_names[1] = s.feedback.joint_names[0];
-  EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedback);
+  EXPECT_EQ(s.evaluate(), FeedbackVerdict::DuplicateJointName);
 }
 
 TEST(RealFeedbackGate, EmptyFeedbackJointNameIsRejected)
 {
   Scenario s;
   s.feedback.joint_names[1] = "";
-  EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedback);
+  EXPECT_EQ(s.evaluate(), FeedbackVerdict::EmptyJointName);
 }
 
 TEST(RealFeedbackGate, PositionAndNameSizeMismatchIsRejected)
 {
   Scenario s;
   s.feedback.positions.push_back(0.0);
-  EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedback);
+  EXPECT_EQ(s.evaluate(), FeedbackVerdict::InvalidFeedbackDimensions);
+}
+
+TEST(RealFeedbackGate, FeedbackJointOrderMayDifferFromTheTargetOrder)
+{
+  // Joints are matched by name, not by index, so a differently ordered vendor
+  // array must still be judged correctly instead of mismatching positions.
+  Scenario s;
+  s.feedback.joint_names = {"arm_1_joint_2", "arm_1_joint_1"};
+  s.feedback.positions = {-0.5, 0.5};
+  s.feedback.velocities = {0.0, 0.0};
+  EXPECT_EQ(s.evaluate(), FeedbackVerdict::Reached);
+
+  // ... and a permuted array that is actually wrong must still fail.
+  Scenario wrong;
+  wrong.feedback.joint_names = {"arm_1_joint_2", "arm_1_joint_1"};
+  wrong.feedback.positions = {0.5, -0.5};
+  wrong.feedback.velocities = {0.0, 0.0};
+  EXPECT_EQ(wrong.evaluate(), FeedbackVerdict::PositionOutsideTolerance);
 }
 
 TEST(RealFeedbackGate, ExtraUnrelatedJointsAreTolerated)

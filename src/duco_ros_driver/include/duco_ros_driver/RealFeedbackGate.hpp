@@ -18,6 +18,10 @@
 // A Reached verdict only means that valid feedback satisfies the numeric
 // tolerances.  It is NOT a vendor confirmation that the controller finished the
 // trajectory or that the robot performed a safe stop.
+//
+// Every check returns a distinct verdict so that "why was completion refused"
+// can be answered without guessing, and so that a caller can never average a
+// NaN, a missing array or a duplicated joint name into a "reached" answer.
 
 #ifndef DUCO_ROS_DRIVER_REAL_FEEDBACK_GATE_HPP
 #define DUCO_ROS_DRIVER_REAL_FEEDBACK_GATE_HPP
@@ -31,7 +35,8 @@
 #include <unordered_set>
 #include <vector>
 
-namespace duco_reliability {
+namespace duco_reliability
+{
 
 using SteadyClock = std::chrono::steady_clock;
 
@@ -77,6 +82,15 @@ struct FeedbackPolicy {
   double velocity_tolerance{0.05};
   std::chrono::milliseconds feedback_max_age{1000};
   std::chrono::milliseconds status_max_age{1000};
+  /**
+   * \brief Whether the velocity array is part of the completion decision.
+   *
+   * When true a missing or incomplete velocity array is a hard failure: an
+   * absent array must never be treated as "velocity is zero".  When false the
+   * velocity test is skipped entirely for an absent array (it is still applied
+   * to any array that is present, and a partial array is still rejected).
+   */
+  bool require_velocity{true};
 };
 
 enum class FeedbackVerdict {
@@ -88,7 +102,11 @@ enum class FeedbackVerdict {
   NoNewFeedback,
   StaleFeedback,
   InvalidTarget,
-  InvalidFeedback,
+  InvalidFeedbackDimensions,
+  EmptyJointName,
+  DuplicateJointName,
+  NonFinitePosition,
+  NonFiniteVelocity,
   MissingJoint,
   PositionOutsideTolerance,
   VelocityOutsideTolerance
@@ -105,7 +123,11 @@ inline const char * feedbackVerdictName(FeedbackVerdict verdict) noexcept
     case FeedbackVerdict::NoNewFeedback: return "no_new_feedback";
     case FeedbackVerdict::StaleFeedback: return "stale_feedback";
     case FeedbackVerdict::InvalidTarget: return "invalid_target";
-    case FeedbackVerdict::InvalidFeedback: return "invalid_feedback";
+    case FeedbackVerdict::InvalidFeedbackDimensions: return "invalid_feedback_dimensions";
+    case FeedbackVerdict::EmptyJointName: return "empty_joint_name";
+    case FeedbackVerdict::DuplicateJointName: return "duplicate_joint_name";
+    case FeedbackVerdict::NonFinitePosition: return "non_finite_position";
+    case FeedbackVerdict::NonFiniteVelocity: return "non_finite_velocity";
     case FeedbackVerdict::MissingJoint: return "missing_joint";
     case FeedbackVerdict::PositionOutsideTolerance: return "position_outside_tolerance";
     case FeedbackVerdict::VelocityOutsideTolerance: return "velocity_outside_tolerance";
@@ -170,23 +192,39 @@ inline FeedbackVerdict evaluateRealFeedback(
     }
   }
 
+  // Dimensions first: the arrays must be self-consistent before any element is
+  // inspected, otherwise an index computed from one array could address another.
   if (feedback.joint_names.empty() ||
-    feedback.joint_names.size() != feedback.positions.size() ||
-    feedback.joint_names.size() != feedback.velocities.size())
+    feedback.positions.size() != feedback.joint_names.size())
   {
-    return FeedbackVerdict::InvalidFeedback;
+    return FeedbackVerdict::InvalidFeedbackDimensions;
   }
+  if (policy.require_velocity) {
+    if (feedback.velocities.size() != feedback.joint_names.size()) {
+      return FeedbackVerdict::InvalidFeedbackDimensions;
+    }
+  } else if (!feedback.velocities.empty() &&
+    feedback.velocities.size() != feedback.joint_names.size())
+  {
+    return FeedbackVerdict::InvalidFeedbackDimensions;
+  }
+  const bool use_velocity = policy.require_velocity || !feedback.velocities.empty();
 
   std::unordered_map<std::string, std::size_t> by_name;
   by_name.reserve(feedback.joint_names.size());
 
   for (std::size_t i = 0; i < feedback.joint_names.size(); ++i) {
-    if (feedback.joint_names[i].empty() ||
-      !by_name.emplace(feedback.joint_names[i], i).second ||
-      !std::isfinite(feedback.positions[i]) ||
-      !std::isfinite(feedback.velocities[i]))
-    {
-      return FeedbackVerdict::InvalidFeedback;
+    if (feedback.joint_names[i].empty()) {
+      return FeedbackVerdict::EmptyJointName;
+    }
+    if (!by_name.emplace(feedback.joint_names[i], i).second) {
+      return FeedbackVerdict::DuplicateJointName;
+    }
+    if (!std::isfinite(feedback.positions[i])) {
+      return FeedbackVerdict::NonFinitePosition;
+    }
+    if (use_velocity && !std::isfinite(feedback.velocities[i])) {
+      return FeedbackVerdict::NonFiniteVelocity;
     }
   }
 
@@ -202,7 +240,7 @@ inline FeedbackVerdict evaluateRealFeedback(
     {
       return FeedbackVerdict::PositionOutsideTolerance;
     }
-    if (std::abs(feedback.velocities[index]) > policy.velocity_tolerance) {
+    if (use_velocity && std::abs(feedback.velocities[index]) > policy.velocity_tolerance) {
       return FeedbackVerdict::VelocityOutsideTolerance;
     }
   }

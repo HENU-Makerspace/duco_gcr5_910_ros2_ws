@@ -6,6 +6,7 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
+    OpaqueFunction,
     SetEnvironmentVariable,
     TimerAction,
 )
@@ -26,6 +27,30 @@ from moveit_configs_utils import MoveItConfigsBuilder
 def load_yaml_file(path):
     with open(path, "r", encoding="utf-8") as file:
         return yaml.safe_load(file)
+
+
+def _is_true(value):
+    return str(value).strip().lower() in ("true", "1", "yes", "on")
+
+
+def validate_real_robot_settings(context, *args, **kwargs):
+    """Fail loudly instead of silently launching a different configuration."""
+    use_real = LaunchConfiguration("use_real_robot").perform(context)
+    wait_for_real = LaunchConfiguration("wait_for_real").perform(context)
+    host = LaunchConfiguration("server_host_1").perform(context)
+
+    if _is_true(use_real) and not str(host).strip():
+        raise RuntimeError(
+            "use_real_robot:=true requires an explicit server_host_1. The previous hard-coded "
+            "address 192.168.6.4 was removed because a historical address is not evidence that it "
+            "is the robot's current address."
+        )
+    if _is_true(wait_for_real) and not _is_true(use_real):
+        raise RuntimeError(
+            "wait_for_real:=true requires use_real_robot:=true; there is nothing to wait for when "
+            "the real channel is disabled."
+        )
+    return []
 
 
 def generate_launch_description():
@@ -131,20 +156,39 @@ def generate_launch_description():
             {"wait_for_real": LaunchConfiguration("wait_for_real")},
             {"real_feedback_topic": LaunchConfiguration("real_feedback_topic")},
             {"real_status_topic": LaunchConfiguration("real_status_topic")},
-            {"real_goal_tolerance": LaunchConfiguration("real_goal_tolerance")},
-            {"real_velocity_tolerance": LaunchConfiguration("real_velocity_tolerance")},
-            {"real_feedback_timeout": LaunchConfiguration("real_feedback_timeout")},
-            {"real_status_timeout": LaunchConfiguration("real_status_timeout")},
-            {"min_real_trajectory_points": LaunchConfiguration("min_real_trajectory_points")},
+            {"real_goal_tolerance": ParameterValue(
+                LaunchConfiguration("real_goal_tolerance"), value_type=float)},
+            {"real_velocity_tolerance": ParameterValue(
+                LaunchConfiguration("real_velocity_tolerance"), value_type=float)},
+            {"real_feedback_max_age": ParameterValue(
+                LaunchConfiguration("real_feedback_max_age"), value_type=float)},
+            {"real_status_max_age": ParameterValue(
+                LaunchConfiguration("real_status_max_age"), value_type=float)},
+            {"real_require_velocity": ParameterValue(
+                LaunchConfiguration("real_require_velocity"), value_type=bool)},
+            {"real_motion_state_topic": LaunchConfiguration("real_motion_state_topic")},
+            {"min_real_trajectory_points": ParameterValue(
+                LaunchConfiguration("min_real_trajectory_points"), value_type=int)},
             {"clear_fault_service": LaunchConfiguration("clear_fault_service")},
+            {"fault_recovery_enabled": ParameterValue(
+                LaunchConfiguration("fault_recovery_enabled"), value_type=bool)},
+            {"latch_on_real_fault": ParameterValue(
+                LaunchConfiguration("latch_on_real_fault"), value_type=bool)},
             {"fault_latch_file": LaunchConfiguration("fault_latch_file")},
-            {"real_execution_timeout": LaunchConfiguration("real_execution_timeout")},
-            {"publish_real_stop_request": LaunchConfiguration("publish_real_stop_request")},
-            {"acceptance_timeout": LaunchConfiguration("acceptance_timeout")},
-            {"sim_execution_timeout": LaunchConfiguration("sim_execution_timeout")},
-            {"cancel_timeout": LaunchConfiguration("cancel_timeout")},
-            {"enforce_expected_joint_names": LaunchConfiguration("enforce_expected_joint_names")},
-            {"sim_time_scale": LaunchConfiguration("sim_time_scale")},
+            {"real_execution_timeout": ParameterValue(
+                LaunchConfiguration("real_execution_timeout"), value_type=float)},
+            {"publish_real_stop_request": ParameterValue(
+                LaunchConfiguration("publish_real_stop_request"), value_type=bool)},
+            {"acceptance_timeout": ParameterValue(
+                LaunchConfiguration("acceptance_timeout"), value_type=float)},
+            {"sim_execution_timeout": ParameterValue(
+                LaunchConfiguration("sim_execution_timeout"), value_type=float)},
+            {"cancel_timeout": ParameterValue(
+                LaunchConfiguration("cancel_timeout"), value_type=float)},
+            {"enforce_expected_joint_names": ParameterValue(
+                LaunchConfiguration("enforce_expected_joint_names"), value_type=bool)},
+            {"sim_time_scale": ParameterValue(
+                LaunchConfiguration("sim_time_scale"), value_type=float)},
         ],
     )
 
@@ -247,25 +291,41 @@ def generate_launch_description():
                 default_value=os.path.join(package_share, "config", "initial_positions_gazebo.yaml"),
             ),
             DeclareLaunchArgument("use_rviz", default_value="true"),
-            DeclareLaunchArgument("use_real_robot", default_value="true"),
+            # The real channel must be enabled explicitly: a plain launch must
+            # never be able to command the physical arm.
+            DeclareLaunchArgument("use_real_robot", default_value="false"),
             DeclareLaunchArgument("use_real_control_services", default_value="true"),
             DeclareLaunchArgument("arm_num", default_value="1"),
             DeclareLaunchArgument("arm_dof", default_value="6"),
-            DeclareLaunchArgument("server_host_1", default_value="192.168.6.4"),
+            # No address is assumed any more.  A historical IP is not evidence
+            # that it is the robot's current address, so use_real_robot:=true
+            # requires an explicit server_host_1.
+            DeclareLaunchArgument("server_host_1", default_value=""),
             DeclareLaunchArgument("robot_speed", default_value="0.1"),
             DeclareLaunchArgument("robot_acc", default_value="0.15"),
             DeclareLaunchArgument("trajectory_speed_scale", default_value="1.0"),
             DeclareLaunchArgument("sync_with_trajectory_timing", default_value="true"),
             DeclareLaunchArgument("sim_time_scale", default_value="1.0"),
-            DeclareLaunchArgument("wait_for_real", default_value="true"),
+            # Only meaningful together with use_real_robot:=true.  Defaulting it
+            # to false keeps the default launch a pure simulation, and asking for
+            # a closed-loop dual run is then an explicit choice.
+            DeclareLaunchArgument("wait_for_real", default_value="false"),
             DeclareLaunchArgument("real_feedback_topic", default_value="real_feedback_states"),
             DeclareLaunchArgument("real_status_topic", default_value="/duco_cobot/robot_state"),
             DeclareLaunchArgument("real_goal_tolerance", default_value="0.02"),
             DeclareLaunchArgument("real_velocity_tolerance", default_value="0.05"),
-            DeclareLaunchArgument("real_feedback_timeout", default_value="1.0"),
-            DeclareLaunchArgument("real_status_timeout", default_value="1.0"),
+            DeclareLaunchArgument("real_feedback_max_age", default_value="1.0"),
+            DeclareLaunchArgument("real_status_max_age", default_value="1.0"),
+            DeclareLaunchArgument("real_require_velocity", default_value="true"),
+            DeclareLaunchArgument(
+                "real_motion_state_topic", default_value="dual_trajectory/real_motion_state"
+            ),
             DeclareLaunchArgument("min_real_trajectory_points", default_value="2"),
             DeclareLaunchArgument("clear_fault_service", default_value="clear_fault"),
+            # Enabling the recovery service is an explicit operator action; a
+            # ROS 2 service cannot be authenticated on its own.
+            DeclareLaunchArgument("fault_recovery_enabled", default_value="false"),
+            DeclareLaunchArgument("latch_on_real_fault", default_value="true"),
             DeclareLaunchArgument(
                 "fault_latch_file", default_value="/tmp/duco_dual_trajectory_fault.state"
             ),
@@ -275,6 +335,7 @@ def generate_launch_description():
             DeclareLaunchArgument("sim_execution_timeout", default_value="300.0"),
             DeclareLaunchArgument("cancel_timeout", default_value="5.0"),
             DeclareLaunchArgument("enforce_expected_joint_names", default_value="true"),
+            OpaqueFunction(function=validate_real_robot_settings),
             SetEnvironmentVariable(
                 name="GZ_SIM_RESOURCE_PATH",
                 value=[duco_support_share_parent, ":", EnvironmentVariable("GZ_SIM_RESOURCE_PATH", default_value="")],

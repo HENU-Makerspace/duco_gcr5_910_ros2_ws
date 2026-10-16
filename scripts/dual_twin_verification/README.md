@@ -77,3 +77,17 @@ scripts/dual_twin_verification/stop_all.sh
   真机的断连、缓存重发与抖动时序；那些场景由 `test_real_feedback_gate.cpp`
   的单元测试覆盖。
 - 该验证不会、也不能证明“经认证的安全停止”：厂商没有停止确认接口。
+- `phase_b_node.sh` 显式设置 `fault_recovery_enabled:=true`（该参数默认为
+  `false`），因为本脚本要验证人工恢复流程本身；真机部署应由操作者按需开启。
+- `phase_b_node.sh` 使用 `wait_for_real:=true`（闭环模式）。若使用
+  `wait_for_real:=false`，每次实体轨迹结束后都会保留“实体完成未确认”的闭锁，
+  需要操作者恢复后才能下发下一条实体轨迹——这是刻意的保守行为。
+
+## 参数与行为变化（相对上一轮）
+
+- `real_feedback_timeout` → `real_feedback_max_age`；`real_status_timeout` →
+  `real_status_max_age`（语义不变，仅改名以与需求文档一致）。
+- 新增 `real_require_velocity`（默认 `true`）、`real_motion_state_topic`
+  （诊断话题）、`fault_recovery_enabled`（默认 `false`）、`latch_on_real_fault`
+  （默认 `true`）、`real_unhealthy_robot_states`（默认空）。
+- 节点默认值 `publish_real` 由 `true` 改为 `false`：实体通道必须显式开启。
