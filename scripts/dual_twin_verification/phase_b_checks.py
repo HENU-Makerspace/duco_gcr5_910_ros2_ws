@@ -9,6 +9,10 @@ reach the physical arm.
 Scenarios
   S1  healthy synchronized goal                             -> SUCCEEDED
   S2  cancel a goal that already commanded the real arm      -> CANCELED + latch
+      (the controller answers the cancel, so the cancel result is the one the
+      controller reported; the timeout and rejected-cancel paths cannot be
+      produced with a real ros2_control controller and are covered instead by
+      the mock-controller integration tests)
   S3  new goals refused while latched; operator recovery     -> usable again
   S4  unhealthy robot status while executing                 -> ABORTED + latch
   S5  recovery accepted once the robot reports healthy again

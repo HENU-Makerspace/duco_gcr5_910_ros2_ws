@@ -175,6 +175,8 @@ def generate_launch_description():
             {"latch_on_real_fault": ParameterValue(
                 LaunchConfiguration("latch_on_real_fault"), value_type=bool)},
             {"fault_latch_file": LaunchConfiguration("fault_latch_file")},
+            {"real_persistence_required": ParameterValue(
+                LaunchConfiguration("real_persistence_required"), value_type=bool)},
             {"real_execution_timeout": ParameterValue(
                 LaunchConfiguration("real_execution_timeout"), value_type=float)},
             {"publish_real_stop_request": ParameterValue(
@@ -326,9 +328,15 @@ def generate_launch_description():
             # ROS 2 service cannot be authenticated on its own.
             DeclareLaunchArgument("fault_recovery_enabled", default_value="false"),
             DeclareLaunchArgument("latch_on_real_fault", default_value="true"),
-            DeclareLaunchArgument(
-                "fault_latch_file", default_value="/tmp/duco_dual_trajectory_fault.state"
-            ),
+            # Empty selects the node's built-in default, which is a per-user
+            # state directory ($XDG_STATE_HOME or ~/.local/state).  A shared
+            # temporary directory is deliberately not used: it is emptied by tmp
+            # cleaners and by reboots, which would erase the memory of an
+            # unconfirmed real motion.
+            DeclareLaunchArgument("fault_latch_file", default_value=""),
+            # When true the interlock state file must be writable before a real
+            # trajectory may be published; otherwise real motion is refused.
+            DeclareLaunchArgument("real_persistence_required", default_value="true"),
             DeclareLaunchArgument("real_execution_timeout", default_value="300.0"),
             DeclareLaunchArgument("publish_real_stop_request", default_value="true"),
             DeclareLaunchArgument("acceptance_timeout", default_value="5.0"),

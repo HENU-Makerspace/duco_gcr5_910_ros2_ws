@@ -16,6 +16,7 @@
 // the feedback gate reason about.
 
 #include <atomic>
+#include <algorithm>
 #include <chrono>
 #include <future>
 #include <memory>
@@ -29,6 +30,8 @@
 #include <cstdint>
 #include <cstdio>
 #include <fstream>
+#include <sys/stat.h>
+#include <unistd.h>
 #include <control_msgs/action/follow_joint_trajectory.hpp>
 #include <rclcpp/rclcpp.hpp>
 #include <rclcpp_action/rclcpp_action.hpp>
@@ -102,6 +105,11 @@ public:
   std::atomic<int> cancel_requests{0};
 
 private:
+  /// Goal handles kept alive to model a controller that accepted a cancel
+  /// request but never sent a terminal state.
+  std::mutex held_mutex_;
+  std::vector<std::shared_ptr<SimGoalHandle>> held_;
+
   void onAccepted(const std::shared_ptr<SimGoalHandle> handle)
   {
     ++accepted_count;
@@ -111,6 +119,14 @@ private:
         if (!ignore_cancel.load() && handle->is_canceling()) {
           if (answer_cancel_with_result.load()) {
             handle->canceled(std::make_shared<FollowJointTrajectory::Result>());
+          } else {
+            // Model "Gazebo accepted the cancel and never reported a terminal
+            // state" faithfully.  The server-side goal handle must stay alive:
+            // releasing the last reference lets rclcpp_action answer the pending
+            // GetResult request with the CANCELING status, which would look like
+            // a cancelled result the controller never sent.
+            std::lock_guard<std::mutex> lock(held_mutex_);
+            held_.push_back(handle);
           }
           return;
         }
@@ -139,7 +155,12 @@ private:
 /// Optional harness settings that most tests do not need.
 struct HarnessExtras {
   bool fault_recovery_enabled{true};
+  /// Empty selects a unique path owned by this harness, so tests never share
+  /// interlock state.  Set to a deliberately unusable path to exercise the
+  /// durability failure path.
   std::string fault_latch_file;
+  /// When false the node publishes real trajectories without a durable record.
+  bool real_persistence_required{true};
   bool latch_on_real_fault{true};
   std::vector<int64_t> unhealthy_robot_states;
   bool require_velocity{true};
@@ -148,6 +169,10 @@ struct HarnessExtras {
   double real_execution_timeout{3.0};
   double cancel_timeout{0.5};
 };
+
+/// A directory no user can create files in, used to prove that an unusable
+/// interlock state file refuses real motion instead of being ignored.
+constexpr char kUnusableLatchPath[] = "/proc/self/duco_test_marker/marker.state";
 
 class Harness
 {
@@ -166,6 +191,11 @@ public:
     sim_action_ = "sim_arm_1_controller/follow_joint_trajectory" + suffix;
     real_command_topic_ = "joint_path_command" + suffix;
     motion_state_topic_ = "real_motion_state" + suffix;
+    // Each harness owns its interlock state file so that one test can never
+    // inherit a latch from another.
+    marker_path_ = extras.fault_latch_file.empty() ?
+      "/tmp/duco_dual_action_test_" + std::to_string(::getpid()) + "/marker" + suffix + ".state" :
+      extras.fault_latch_file;
 
     sim_ = std::make_shared<MockSimServer>(sim_action_, "mock_sim_server" + suffix);
     sim_->accept_delay = accept_delay;
@@ -195,7 +225,8 @@ public:
       rclcpp::Parameter("latch_on_real_fault", extras.latch_on_real_fault),
       rclcpp::Parameter("real_unhealthy_robot_states", extras.unhealthy_robot_states),
       rclcpp::Parameter("clear_fault_service", std::string("clear_fault") + suffix),
-      rclcpp::Parameter("fault_latch_file", extras.fault_latch_file),
+      rclcpp::Parameter("fault_latch_file", marker_path_),
+      rclcpp::Parameter("real_persistence_required", extras.real_persistence_required),
       rclcpp::Parameter("sim_time_scale", 1.0),
     });
 
@@ -250,9 +281,24 @@ public:
     executor_->remove_node(proxy_);
     executor_->remove_node(sim_);
     executor_->remove_node(helper_);
+
+    // The node owns the marker; drop it so a later test run starts clean.
+    ::unlink(marker_path_.c_str());
+    ::unlink((marker_path_ + ".tmp").c_str());
+    ::rmdir(("/tmp/duco_dual_action_test_" + std::to_string(::getpid())).c_str());
   }
 
   bool ready() const { return ready_; }
+
+  /// The interlock state file this harness configured.
+  const std::string & markerPath() const { return marker_path_; }
+
+  /// True when the durable interlock record exists right now.
+  bool markerExists() const
+  {
+    struct stat info {};
+    return ::stat(marker_path_.c_str(), &info) == 0;
+  }
 
   /// Publish a healthy status and the current feedback from a background thread.
   void startRealPumps()
@@ -448,6 +494,7 @@ private:
   std::string sim_action_;
   std::string real_command_topic_;
   std::string motion_state_topic_;
+  std::string marker_path_;
   rclcpp::Node::SharedPtr helper_;
   rclcpp_action::Client<FollowJointTrajectory>::SharedPtr client_;
   rclcpp_action::Client<FollowJointTrajectory>::SharedPtr sim_client_;
@@ -468,6 +515,25 @@ private:
   std::string latest_motion_state_;
   bool ready_{false};
 };
+
+/**
+ * \\brief Retry the recovery service until the node has seen real robot status.
+ *
+ * The status publisher is created with the helper node, so the first samples can
+ * arrive after the test has started.  The node correctly refuses a recovery
+ * before any status exists, so the tests wait for that first sample instead of
+ * assuming it.
+ */
+bool waitForRecovery(Harness & harness, std::string & message, int attempts = 40)
+{
+  for (int attempt = 0; attempt < attempts; ++attempt) {
+    if (harness.callRecovery(message)) {
+      return true;
+    }
+    std::this_thread::sleep_for(50ms);
+  }
+  return false;
+}
 
 }  // namespace
 
@@ -547,10 +613,13 @@ TEST_F(DualActionTest, CancelWhileExecutingIsForwardedToGazebo)
   EXPECT_EQ(code, rclcpp_action::ResultCode::CANCELED);
 }
 
-TEST_F(DualActionTest, CancelTimeoutStillReportsCanceled)
+TEST_F(DualActionTest, CancelTimeoutIsReportedAsAbortedNotCanceled)
 {
   // Gazebo accepts the cancellation but never reports a terminal state, so the
-  // proxy has to fall back on its cancel timeout.
+  // proxy has to fall back on its cancel timeout.  "The cancel request was
+  // accepted" is not evidence that the trajectory stopped, and the ROS 2 action
+  // state machine uses CANCELED for "the goal was canceled", so the honest
+  // terminal state here is ABORTED.
   Harness h(false, false, 0ms, 10s);
   ASSERT_TRUE(h.ready());
   h.sim_->answer_cancel_with_result = false;
@@ -561,8 +630,12 @@ TEST_F(DualActionTest, CancelTimeoutStillReportsCanceled)
   ASSERT_TRUE(h.cancelGoal(handle));
 
   rclcpp_action::ResultCode code{};
-  ASSERT_TRUE(h.waitForResult(handle, code, 8s));
-  EXPECT_EQ(code, rclcpp_action::ResultCode::CANCELED);
+  int32_t error_code{};
+  ASSERT_TRUE(h.waitForResultWithError(handle, code, error_code, 8s));
+  EXPECT_EQ(code, rclcpp_action::ResultCode::ABORTED)
+    << "a cancel that never produced a result must not be reported as a cancellation";
+  EXPECT_EQ(error_code, FollowJointTrajectory::Result::GOAL_TOLERANCE_VIOLATED)
+    << "the trajectory outcome was never established, so it is not a success";
 }
 
 // ---------------------------------------------------------------------------
@@ -693,13 +766,16 @@ TEST_F(DualActionTest, CancelTimeoutWithRealCommandLatchesAndBlocksNewGoals)
 
   rclcpp_action::ResultCode code{};
   ASSERT_TRUE(h.waitForResult(handle, code, 8s));
-  EXPECT_EQ(code, rclcpp_action::ResultCode::CANCELED);
+  EXPECT_EQ(code, rclcpp_action::ResultCode::ABORTED)
+    << "an unconfirmed cancellation is a failure, not a cancellation";
 
   // The real command was published and its stop was never confirmed, so the
   // next goal must be refused rather than silently accepted.
   auto second = h.sendGoal();
   EXPECT_EQ(second, nullptr)
     << "a goal was accepted after an unconfirmed real stop";
+  EXPECT_TRUE(h.markerExists())
+    << "the unconfirmed real motion must be recorded durably before the goal ends";
 }
 
 TEST_F(DualActionTest, RecoveryIsRefusedWhileTheRobotIsUnhealthy)
@@ -894,7 +970,8 @@ TEST_F(DualActionTest, RejectedCancelIsNotReportedAsACleanCancellation)
   rclcpp_action::ResultCode code{};
   int32_t error_code = 0;
   ASSERT_TRUE(h.waitForResultWithError(handle, code, error_code, 8s));
-  EXPECT_EQ(code, rclcpp_action::ResultCode::CANCELED);
+  EXPECT_EQ(code, rclcpp_action::ResultCode::ABORTED)
+    << "a rejected cancel must not be reported as a cancellation";
   EXPECT_EQ(error_code, FollowJointTrajectory::Result::GOAL_TOLERANCE_VIOLATED)
     << "a rejected cancel must not be reported as a successful cancellation";
 }
@@ -935,7 +1012,8 @@ TEST_F(DualActionTest, RepeatedCancelRequestsTerminateTheGoalOnce)
 
   rclcpp_action::ResultCode code{};
   ASSERT_TRUE(h.waitForResult(handle, code, 8s));
-  EXPECT_EQ(code, rclcpp_action::ResultCode::CANCELED);
+  EXPECT_EQ(code, rclcpp_action::ResultCode::ABORTED)
+    << "repeated cancels still never proved that the trajectory stopped";
 }
 
 // ---------------------------------------------------------------------------
@@ -1030,3 +1108,250 @@ TEST_F(DualActionTest, DiagnosticStateSeparatesSimulationAndRealOutcome)
   EXPECT_TRUE(h.waitForMotionStateContaining("latched=1"))
     << h.latestMotionState();
 }
+
+// ---------------------------------------------------------------------------
+// Durable interlock state
+// ---------------------------------------------------------------------------
+
+TEST_F(DualActionTest, AUsableStateFileIsReportedAsReady)
+{
+  Harness h(true, false);
+  ASSERT_TRUE(h.ready());
+  h.setFaultMode(Harness::kError);
+  std::this_thread::sleep_for(250ms);
+
+  EXPECT_TRUE(h.waitForMotionStateContaining("persistence=ok", 2s))
+    << "the durable record must be reported as usable: " << h.latestMotionState();
+}
+
+TEST_F(DualActionTest, RequiredPersistenceRefusesRealMotionWhenTheStateFileIsUnusable)
+{
+  // real_persistence_required is true, but the state file cannot be written.
+  // Publishing a real trajectory here would create a motion that a restart
+  // could not remember, so it must be refused.
+  Harness::Extras extras;
+  extras.fault_latch_file = kUnusableLatchPath;
+  extras.real_persistence_required = true;
+  Harness h(true, false, 0ms, 200ms, extras);
+  ASSERT_TRUE(h.ready());
+  h.setFeedbackPositions(kGoalPositions);
+
+  EXPECT_EQ(h.sendGoal(), nullptr)
+    << "a real goal was accepted although its durable record cannot be written";
+  EXPECT_TRUE(h.realCommands().empty())
+    << "a real trajectory was published without a durable interlock record";
+
+  // The failure must be visible, not silent.
+  h.setFaultMode(Harness::kError);
+  std::this_thread::sleep_for(250ms);
+  EXPECT_TRUE(h.waitForMotionStateContaining("persistence=unavailable", 2s))
+    << h.latestMotionState();
+}
+
+TEST_F(DualActionTest, OptionalPersistenceStillAllowsRealMotion)
+{
+  // The same unusable path, but durability was explicitly declared optional, so
+  // the real channel keeps working (with a loud error) instead of stopping.
+  Harness::Extras extras;
+  extras.fault_latch_file = kUnusableLatchPath;
+  extras.real_persistence_required = false;
+  Harness h(true, false, 0ms, 200ms, extras);
+  ASSERT_TRUE(h.ready());
+  h.setFeedbackPositions(kGoalPositions);
+
+  auto handle = h.sendGoal();
+  ASSERT_NE(handle, nullptr)
+    << "durability was declared optional, so the goal must still be accepted";
+  rclcpp_action::ResultCode code{};
+  ASSERT_TRUE(h.waitForResult(handle, code, 5s));
+  EXPECT_EQ(code, rclcpp_action::ResultCode::SUCCEEDED);
+
+  const auto commands = h.realCommands();
+  EXPECT_NE(
+    std::find(commands.begin(), commands.end(), std::string("motion")), commands.end())
+    << "the real trajectory should have been published";
+  EXPECT_FALSE(h.markerExists())
+    << "no durable record can exist on an unusable path";
+}
+
+TEST_F(DualActionTest, ARuntimeWriteFailureBlocksRealMotion)
+{
+  if (::geteuid() == 0) {
+    GTEST_SKIP() << "root bypasses directory permissions, so this case cannot be exercised";
+  }
+  // The record works at startup, then the directory becomes unwritable.  A latch
+  // that cannot be recorded must stop the real channel instead of continuing
+  // with a promise it cannot keep.
+  const std::string directory =
+    "/tmp/duco_dual_action_test_ro_" + std::to_string(::getpid());
+  Harness::Extras extras;
+  extras.fault_latch_file = directory + "/marker.state";
+  Harness h(true, false, 0ms, 200ms, extras);
+  ASSERT_TRUE(h.ready());
+
+  ASSERT_EQ(::chmod(directory.c_str(), 0500), 0);
+  h.setFaultMode(Harness::kError);
+  EXPECT_TRUE(h.waitForMotionStateContaining("persistence=unavailable", 3s))
+    << "the failed write must be reported, not swallowed: " << h.latestMotionState();
+
+  // While the record cannot be written, real motion stays refused.
+  EXPECT_EQ(h.sendGoal(), nullptr)
+    << "a real goal was accepted although the durable record cannot be written";
+  EXPECT_TRUE(h.realCommands().empty()) << "a real trajectory was still published";
+
+  // Once the operator restores the directory, the channel becomes usable again.
+  ASSERT_EQ(::chmod(directory.c_str(), 0700), 0);
+  h.setFaultMode(Harness::kNoFault);
+  std::this_thread::sleep_for(250ms);
+  std::string message;
+  ASSERT_TRUE(waitForRecovery(h, message)) << message;
+
+  h.setFeedbackPositions(kGoalPositions);
+  auto handle = h.sendGoal();
+  ASSERT_NE(handle, nullptr) << "the channel did not recover after the directory was restored";
+  rclcpp_action::ResultCode code{};
+  ASSERT_TRUE(h.waitForResult(handle, code, 5s));
+  ASSERT_TRUE(h.callRecovery(message)) << message;
+
+  ::unlink((directory + "/marker.state").c_str());
+  ::unlink((directory + "/marker.state.tmp").c_str());
+  ::rmdir(directory.c_str());
+}
+
+TEST_F(DualActionTest, TheDurableRecordExistsWhenTheResultIsDelivered)
+{
+  // The task slot release and the durable record belong to one transaction: once
+  // the client sees the result, the record must already be on disk, otherwise a
+  // crash in between would erase the memory of an unconfirmed real motion.
+  Harness h(true, false, 0ms, 200ms);
+  ASSERT_TRUE(h.ready());
+  h.setFeedbackPositions(kGoalPositions);
+  ASSERT_FALSE(h.markerExists()) << "the harness must start without a record";
+
+  auto handle = h.sendGoal();
+  ASSERT_NE(handle, nullptr);
+  rclcpp_action::ResultCode code{};
+  ASSERT_TRUE(h.waitForResult(handle, code, 5s));
+  ASSERT_EQ(code, rclcpp_action::ResultCode::SUCCEEDED)
+    << "the simulation result is still reported (wait_for_real is false)";
+
+  EXPECT_TRUE(h.markerExists())
+    << "the result was delivered before the unconfirmed motion was recorded";
+
+  std::string message;
+  ASSERT_TRUE(h.callRecovery(message)) << message;
+  EXPECT_FALSE(h.markerExists()) << "the operator recovery must drop the record";
+}
+
+TEST_F(DualActionTest, UnconfirmedFinishAndANewGoalAreNeverInconsistent)
+{
+  // "The task ended" and "the next task arrives" interleave as fast as the test
+  // can make them.  The interlock must never be observable as released while the
+  // durable record of the previous motion still stands.
+  Harness h(true, false, 0ms, 200ms);
+  ASSERT_TRUE(h.ready());
+  h.setFeedbackPositions(kGoalPositions);
+
+  for (int iteration = 0; iteration < 3; ++iteration) {
+    auto handle = h.sendGoal();
+    ASSERT_NE(handle, nullptr) << "iteration " << iteration;
+    rclcpp_action::ResultCode code{};
+    ASSERT_TRUE(h.waitForResult(handle, code, 5s)) << "iteration " << iteration;
+    ASSERT_EQ(code, rclcpp_action::ResultCode::SUCCEEDED);
+
+    // Immediately, without any sleep: the slot is free but the channel is not.
+    EXPECT_EQ(h.sendGoal(), nullptr)
+      << "iteration " << iteration << ": a goal was accepted while the previous real motion was "
+      << "still unconfirmed";
+    EXPECT_TRUE(h.markerExists()) << "iteration " << iteration;
+
+    std::string message;
+    ASSERT_TRUE(h.callRecovery(message)) << "iteration " << iteration << ": " << message;
+    EXPECT_FALSE(h.markerExists()) << "iteration " << iteration;
+
+    auto after_recovery = h.sendGoal();
+    ASSERT_NE(after_recovery, nullptr)
+      << "iteration " << iteration << ": the channel stayed blocked after a recovery";
+    rclcpp_action::ResultCode second_code{};
+    ASSERT_TRUE(h.waitForResult(after_recovery, second_code, 5s));
+    ASSERT_TRUE(h.callRecovery(message)) << message;
+  }
+}
+
+TEST_F(DualActionTest, ARestartWithARecordLatchesUntilAnOperatorRecovers)
+{
+  Harness::Extras extras;
+  extras.fault_latch_file =
+    "/tmp/duco_dual_action_test_restart_" + std::to_string(::getpid()) + ".state";
+  {
+    std::ofstream record(extras.fault_latch_file, std::ios::trunc);
+    record << "goal-previous executing: interrupted run\n";
+  }
+
+  Harness h(true, false, 0ms, 200ms, extras);
+  ASSERT_TRUE(h.ready());
+  h.setFeedbackPositions(kGoalPositions);
+
+  EXPECT_EQ(h.sendGoal(), nullptr)
+    << "a restart must not silently clear an unconfirmed real motion";
+
+  std::string message;
+  ASSERT_TRUE(h.callRecovery(message)) << message;
+  EXPECT_FALSE(h.markerExists());
+
+  auto handle = h.sendGoal();
+  ASSERT_NE(handle, nullptr) << "the channel must be usable after a recovery";
+}
+
+TEST_F(DualActionTest, AnEmptyRecordStillLatchesOnRestart)
+{
+  // A record that exists at all means "not confirmed"; an empty one must not be
+  // read as a clean state.
+  Harness::Extras extras;
+  extras.fault_latch_file =
+    "/tmp/duco_dual_action_test_empty_" + std::to_string(::getpid()) + ".state";
+  {
+    std::ofstream record(extras.fault_latch_file, std::ios::trunc);
+  }
+
+  Harness h(true, false, 0ms, 200ms, extras);
+  ASSERT_TRUE(h.ready());
+  EXPECT_EQ(h.sendGoal(), nullptr) << "an empty record must still block real motion";
+}
+
+TEST_F(DualActionTest, ASuccessfulRecoveryNeverErasesAConcurrentFault)
+{
+  // The fault is put on the wire *before* the recovery request, so whichever of
+  // the two callbacks wins the lock, the fault must be latched afterwards.  A
+  // recovery that cleared the state it never observed would leave the channel
+  // looking healthy while the robot reported a fault.
+  Harness h(true, false, 0ms, 200ms);
+  ASSERT_TRUE(h.ready());
+
+  std::string message;
+  ASSERT_TRUE(waitForRecovery(h, message)) << message;
+
+  for (int iteration = 0; iteration < 8; ++iteration) {
+    ASSERT_TRUE(waitForRecovery(h, message)) << "iteration " << iteration << ": " << message;
+
+    h.setFaultMode(Harness::kError);
+    h.publishStatus();  // a fault is definitely in flight now
+    h.callRecovery(message);
+    h.setFaultMode(Harness::kNoFault);
+    std::this_thread::sleep_for(400ms);
+
+    EXPECT_TRUE(h.waitForMotionStateContaining("latched=1", 500ms))
+      << "iteration " << iteration
+      << ": the fault reported before the recovery was erased (" << h.latestMotionState() << ")";
+
+    // Re-arm for the next iteration.  With the cell healthy again a recovery
+    // must be accepted.
+    bool cleared = false;
+    for (int attempt = 0; attempt < 40 && !cleared; ++attempt) {
+      cleared = waitForRecovery(h, message);
+    }
+    ASSERT_TRUE(cleared)
+      << "iteration " << iteration << ": the channel never became recoverable again: " << message;
+  }
+}
+

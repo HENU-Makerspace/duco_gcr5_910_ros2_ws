@@ -28,6 +28,7 @@ exec ros2 run duco_ros_driver DualTrajectoryAction --ros-args \
   -p real_status_topic:=/twin_robot_state \
   -p clear_fault_service:=twin_clear_fault \
   -p fault_latch_file:="$TWIN_LATCH" \
+  -p real_persistence_required:=true \
   -p real_goal_tolerance:=0.02 \
   -p real_velocity_tolerance:=0.05 \
   -p real_feedback_max_age:=1.0 \

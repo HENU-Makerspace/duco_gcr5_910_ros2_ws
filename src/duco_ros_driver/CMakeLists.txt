@@ -44,6 +44,10 @@ if(BUILD_TESTING)
   target_include_directories(test_real_motion_interlock PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
 
+  ament_add_gtest(test_interlock_persistence test/test_interlock_persistence.cpp)
+  target_include_directories(test_interlock_persistence PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
   ament_add_gtest(test_trajectory_validation test/test_trajectory_validation.cpp)
   target_include_directories(test_trajectory_validation PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
