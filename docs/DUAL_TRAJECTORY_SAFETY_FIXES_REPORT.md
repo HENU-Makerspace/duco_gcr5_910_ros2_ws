@@ -7,9 +7,10 @@
 - 本轮报告提交：见文末「Git 记录」
 - 与上一轮基线差异：11 个文件，+1557 / −156
 
-> 任务书给出的仓库为 `lsh953/duco_gcr5_910`。本机真实 remote 是
-> `HENU-Makerspace/duco_gcr5_910_ros2_ws`，所有工作以本地真实仓库为准，未对
-> 任务书中的仓库做任何操作（无该仓库的推送权限，也无法确认其与本工程同源）。
+> 任务书给出的仓库为 `lsh953/duco_gcr5_910`。开发期间的 `origin` 是本机的另一个
+> 组织仓库（`HENU-Makerspace/duco_gcr5_910_ros2_ws`），两者提交历史同源。
+> 应要求，本轮成果最终**同时上传到了 `lsh953/duco_gcr5_910` 的 `main` 分支**
+> （见第九节）。
 
 ## 一、阶段一：代码审查结论
 
@@ -340,6 +341,32 @@ robot_state=<厂商值>;reason=<原因>
 | 本分支后续提交 | 本开发报告与测试报告（`docs/DUAL_TRAJECTORY_SAFETY_FIXES_*.md`） |
 
 分支：`codex/dual-trajectory-safety-fixes`（已推送至 `origin`）。
+
+### 目标仓库
+
+| 仓库 | 引用 | 说明 |
+|------|------|------|
+| `lsh953/duco_gcr5_910` | **`main`** | 应要求上传的目标仓库，`d12a65f..e424ba7` **纯快进**（无历史重写、无强制推送） |
+| `HENU-Makerspace/duco_gcr5_910_ros2_ws` | `codex/dual-trajectory-safety-fixes` | 开发用组织仓库（`origin`），同源历史 |
+
+`main` 快进带上的提交（自 `d12a65f` 起共 11 个）：
+
+```
+7e42b9e Support separate PLC power and enable commands
+253ef6f Use held PLC power and enable requests
+8435657 Restore pulsed PLC command requests
+b47d3e2 Improve dual trajectory execution reliability
+c0c0943 Gate real robot completion on fresh, valid feedback
+440b2a6 Latch unconfirmed real motion and recover only on operator request
+2f036b2 Document the dual trajectory reliability fixes and their verification
+96bbd6e Add a reproducible digital-twin verification harness
+b6dfbca Separate real motion permission from the action goal
+ad12de4 Document the dual trajectory safety fixes and their verification
+e424ba7 Record the branch state in the development report
+```
+
+`lsh953/duco_gcr5_910` 的 `main` 与 `HENU` 的
+`codex/dual-trajectory-safety-fixes` 内容完全一致（同一提交 `e424ba7`）。
 
 审查提示：`DualTrajectoryAction.hpp` 是从 .cpp 拆分并大幅演进的单文件节点类，
 Git 不会把它识别为重命名，**真正的语义变化请用**
