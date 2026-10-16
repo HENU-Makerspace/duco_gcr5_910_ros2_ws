@@ -14,6 +14,7 @@ find_package(control_msgs)
 find_package(sensor_msgs REQUIRED)
 find_package(trajectory_msgs REQUIRED)
 find_package(std_msgs REQUIRED)
+find_package(std_srvs REQUIRED)
 find_package(duco_msg)
 
 # uncomment the following section in order to fill in
@@ -44,6 +45,15 @@ if(BUILD_TESTING)
     ${CMAKE_CURRENT_SOURCE_DIR}/include)
   ament_target_dependencies(test_trajectory_validation
     builtin_interfaces trajectory_msgs)
+
+  # Integration tests: a mock Gazebo action server drives the node under test
+  # through its public interfaces only.
+  ament_add_gtest(test_dual_trajectory_action test/test_dual_trajectory_action.cpp)
+  target_include_directories(test_dual_trajectory_action PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  ament_target_dependencies(test_dual_trajectory_action
+    rclcpp rclcpp_action builtin_interfaces control_msgs sensor_msgs
+    trajectory_msgs std_msgs std_srvs duco_msg)
 endif()
 add_executable(DucoDriver src/DucoDriver.cpp src/DucoDriverNode.cpp src/RobotNode.cpp)
 add_executable(DucoRobotStatus src/DucoRobotStatus.cpp src/DucoRobotStatusNode.cpp src/RobotNode.cpp)
@@ -55,7 +65,7 @@ add_executable(DucoRobotControl src/DucoRobotControl.cpp src/RobotNode.cpp)
 ament_target_dependencies(DucoDriver rclcpp rclcpp_action control_msgs sensor_msgs trajectory_msgs std_msgs duco_msg)
 ament_target_dependencies(DucoRobotStatus rclcpp rclcpp_action control_msgs sensor_msgs trajectory_msgs std_msgs duco_msg)
 ament_target_dependencies(DucoTrajectoryAction rclcpp rclcpp_action control_msgs sensor_msgs trajectory_msgs std_msgs duco_msg)
-ament_target_dependencies(DualTrajectoryAction rclcpp rclcpp_action builtin_interfaces control_msgs sensor_msgs trajectory_msgs std_msgs duco_msg)
+ament_target_dependencies(DualTrajectoryAction rclcpp rclcpp_action builtin_interfaces control_msgs sensor_msgs trajectory_msgs std_msgs std_srvs duco_msg)
 ament_target_dependencies(DucoRobotControl rclcpp rclcpp_action control_msgs sensor_msgs trajectory_msgs std_msgs duco_msg)
 
 install (TARGETS DucoDriver DESTINATION lib/${PROJECT_NAME}

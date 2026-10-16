@@ -136,6 +136,8 @@ def generate_launch_description():
             {"real_feedback_timeout": LaunchConfiguration("real_feedback_timeout")},
             {"real_status_timeout": LaunchConfiguration("real_status_timeout")},
             {"min_real_trajectory_points": LaunchConfiguration("min_real_trajectory_points")},
+            {"clear_fault_service": LaunchConfiguration("clear_fault_service")},
+            {"fault_latch_file": LaunchConfiguration("fault_latch_file")},
             {"real_execution_timeout": LaunchConfiguration("real_execution_timeout")},
             {"publish_real_stop_request": LaunchConfiguration("publish_real_stop_request")},
             {"acceptance_timeout": LaunchConfiguration("acceptance_timeout")},
@@ -263,6 +265,10 @@ def generate_launch_description():
             DeclareLaunchArgument("real_feedback_timeout", default_value="1.0"),
             DeclareLaunchArgument("real_status_timeout", default_value="1.0"),
             DeclareLaunchArgument("min_real_trajectory_points", default_value="2"),
+            DeclareLaunchArgument("clear_fault_service", default_value="clear_fault"),
+            DeclareLaunchArgument(
+                "fault_latch_file", default_value="/tmp/duco_dual_trajectory_fault.state"
+            ),
             DeclareLaunchArgument("real_execution_timeout", default_value="300.0"),
             DeclareLaunchArgument("publish_real_stop_request", default_value="true"),
             DeclareLaunchArgument("acceptance_timeout", default_value="5.0"),
