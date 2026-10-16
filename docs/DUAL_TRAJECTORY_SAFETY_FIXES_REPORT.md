@@ -337,9 +337,9 @@ robot_state=<厂商值>;reason=<原因>
 |------|------|
 | `96bbd6e` | 本轮基线（上一轮分支 HEAD） |
 | `b6dfbca` | 本轮全部代码/测试/脚本/配置修改（11 文件） |
-| `32786a4` | 本开发报告与测试报告（`docs/`） |
+| 本分支后续提交 | 本开发报告与测试报告（`docs/DUAL_TRAJECTORY_SAFETY_FIXES_*.md`） |
 
-分支：`codex/dual-trajectory-safety-fixes` → 已推送至 `origin`。
+分支：`codex/dual-trajectory-safety-fixes`（已推送至 `origin`）。
 
 审查提示：`DualTrajectoryAction.hpp` 是从 .cpp 拆分并大幅演进的单文件节点类，
 Git 不会把它识别为重命名，**真正的语义变化请用**
