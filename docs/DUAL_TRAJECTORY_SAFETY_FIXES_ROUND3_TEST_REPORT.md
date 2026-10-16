@@ -230,6 +230,11 @@ Summary: 207 tests, 0 errors, 38 failures, 28 skipped
 | gtest（5 个二进制） | 130 | **0** | 功能测试全部通过 |
 | `uncrustify` | 28 个文件 | 25 | **仓库既有**风格偏差 |
 | `lint_cmake` | 11 条 | 11 | **仓库既有** `CMakeLists.txt` 空白/行长问题 |
+| `cppcheck` | 28 | 0（28 跳过） | 环境未安装，被跳过 |
+| `xmllint` | 1 | 0 | 通过 |
+| CTest 汇总 | 9 | 2 | 即上述两个 lint 的 ctest 条目，无功能失败 |
+
+（38 = 25 + 11 + CTest 汇总里的 2 个 lint 条目；28 skipped = cppcheck。）
 
 - **0 个功能失败**；38 个失败全部来自 lint。
 - `uncrustify` 偏差原因：本仓库的 ament 配置要求 `namespace {`、`struct X {`
