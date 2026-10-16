@@ -108,8 +108,12 @@ source install/setup.bash
 持久化闸门（实际输出）：
 
 ```
-[ERROR] Interlock state file [/proc/self/duco_test_marker/marker.state] cannot be used reliably: cannot create the directory chain ...
-[ERROR] Rejecting goal ...: real_persistence_required is true but the interlock state file [...] cannot be written (...)
+[ERROR] Interlock state file [/proc/self/duco_test_marker/marker.state] cannot be used reliably:
+        cannot create the interlock state directory [/proc/self/duco_test_marker]: No such file or directory
+[ERROR] Rejecting goal 0b00ae8f73eeca2c36c82caed656e5b4: real_persistence_required is true but the
+        interlock state file [/proc/self/duco_test_marker/marker.state] cannot be written
+        (cannot create the interlock state directory [...]: No such file or directory),
+        so a real motion could not be remembered across a restart
 [       OK ] DualActionTest.RequiredPersistenceRefusesRealMotionWhenTheStateFileIsUnusable
 ```
 
@@ -120,6 +124,12 @@ source install/setup.bash
 [ERROR] Real robot fault (goal -): robot error code 42. ...
 [       OK ] DualActionTest.ARuntimeWriteFailureBlocksRealMotion
 ```
+
+说明（避免夸大）：该用例中目标被拒的**直接原因**是联锁已闭锁（`handle_goal` 里联锁检查在持久化检查之前），
+真正证明「写失败被检测而不是被吞掉」的是诊断里的 `persistence=unavailable`。
+真正由持久化闸门直接拒绝目标的用例是
+`RequiredPersistenceRefusesRealMotionWhenTheStateFileIsUnusable`（日志中可见
+`real_persistence_required is true but the interlock state file ... cannot be written`）。
 
 ### 3.1 测试基础设施的两处修正（重要，否则测试会得出错误结论）
 

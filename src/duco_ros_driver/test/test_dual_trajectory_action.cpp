@@ -1194,9 +1194,13 @@ TEST_F(DualActionTest, ARuntimeWriteFailureBlocksRealMotion)
   EXPECT_TRUE(h.waitForMotionStateContaining("persistence=unavailable", 3s))
     << "the failed write must be reported, not swallowed: " << h.latestMotionState();
 
-  // While the record cannot be written, real motion stays refused.
+  // The failed write must keep real motion refused: the interlock is latched and
+  // the durable record is known to be unusable, so nothing real may be published.
+  // (The refusal is reported by the interlock check, which runs first; the
+  // persistence=unavailable assertion above is what proves the write failure was
+  // detected rather than swallowed.)
   EXPECT_EQ(h.sendGoal(), nullptr)
-    << "a real goal was accepted although the durable record cannot be written";
+    << "a real goal was accepted although the interlock is latched and its record is unusable";
   EXPECT_TRUE(h.realCommands().empty()) << "a real trajectory was still published";
 
   // Once the operator restores the directory, the channel becomes usable again.
