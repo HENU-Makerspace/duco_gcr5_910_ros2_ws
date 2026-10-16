@@ -5,11 +5,10 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
-    RegisterEventHandler,
     SetEnvironmentVariable,
+    TimerAction,
 )
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import Command, EnvironmentVariable, LaunchConfiguration, PathJoinSubstitution
 from launch_ros.actions import Node
@@ -95,11 +94,9 @@ def generate_launch_description():
         output="screen",
     )
 
-    start_controllers = RegisterEventHandler(
-        OnProcessExit(
-            target_action=spawn_robot,
-            on_exit=[joint_state_broadcaster_spawner, arm_controller_spawner],
-        )
+    start_controllers = TimerAction(
+        period=5.0,
+        actions=[joint_state_broadcaster_spawner, arm_controller_spawner],
     )
 
     move_group = Node(

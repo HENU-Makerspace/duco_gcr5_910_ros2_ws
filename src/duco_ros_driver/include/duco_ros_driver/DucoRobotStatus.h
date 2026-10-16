@@ -189,10 +189,10 @@ private:
     bool                       controller_connected_flag_=false;
 
     /*机器人开始运动标志*/
-    bool                       start_move_;
+    bool                       start_move_{false};
 
     /*机器人急停标志*/
-    bool                        emergency_stopped_;
+    bool                        emergency_stopped_{false};
 
     std::vector<std::shared_ptr<DucoRPC::DucoCobot> > duco_robots;
     std::vector<std::shared_ptr<EdgeTrigger<int> > > edge_triggers;

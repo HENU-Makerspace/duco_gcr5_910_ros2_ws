@@ -6,11 +6,10 @@ from launch import LaunchDescription
 from launch.actions import (
     DeclareLaunchArgument,
     IncludeLaunchDescription,
-    RegisterEventHandler,
     SetEnvironmentVariable,
+    TimerAction,
 )
 from launch.conditions import IfCondition
-from launch.event_handlers import OnProcessExit
 from launch.launch_description_sources import PythonLaunchDescriptionSource
 from launch.substitutions import (
     Command,
@@ -115,11 +114,9 @@ def generate_launch_description():
         output="screen",
     )
 
-    start_sim_controllers = RegisterEventHandler(
-        OnProcessExit(
-            target_action=spawn_robot,
-            on_exit=[joint_state_broadcaster_spawner, sim_arm_controller_spawner],
-        )
+    start_sim_controllers = TimerAction(
+        period=5.0,
+        actions=[joint_state_broadcaster_spawner, sim_arm_controller_spawner],
     )
 
     dual_trajectory_action = Node(
@@ -130,7 +127,18 @@ def generate_launch_description():
             {"front_action_name": "arm_1_controller/follow_joint_trajectory"},
             {"sim_action_name": "sim_arm_1_controller/follow_joint_trajectory"},
             {"real_command_topic": "joint_path_command"},
-            {"publish_real": True},
+            {"publish_real": LaunchConfiguration("use_real_robot")},
+            {"wait_for_real": LaunchConfiguration("wait_for_real")},
+            {"real_feedback_topic": LaunchConfiguration("real_feedback_topic")},
+            {"real_status_topic": LaunchConfiguration("real_status_topic")},
+            {"real_goal_tolerance": LaunchConfiguration("real_goal_tolerance")},
+            {"real_velocity_tolerance": LaunchConfiguration("real_velocity_tolerance")},
+            {"real_execution_timeout": LaunchConfiguration("real_execution_timeout")},
+            {"publish_real_stop_request": LaunchConfiguration("publish_real_stop_request")},
+            {"acceptance_timeout": LaunchConfiguration("acceptance_timeout")},
+            {"sim_execution_timeout": LaunchConfiguration("sim_execution_timeout")},
+            {"cancel_timeout": LaunchConfiguration("cancel_timeout")},
+            {"enforce_expected_joint_names": LaunchConfiguration("enforce_expected_joint_names")},
             {"sim_time_scale": LaunchConfiguration("sim_time_scale")},
         ],
     )
@@ -193,7 +201,12 @@ def generate_launch_description():
         package="moveit_ros_move_group",
         executable="move_group",
         output="screen",
-        parameters=[moveit_params, {"use_sim_time": True}],
+        parameters=[
+            moveit_params,
+            {"use_sim_time": True},
+            {"trajectory_execution.allowed_execution_duration_scaling": 10.0},
+            {"trajectory_execution.allowed_goal_duration_margin": 5.0},
+        ],
     )
 
     rviz = Node(
@@ -233,12 +246,23 @@ def generate_launch_description():
             DeclareLaunchArgument("use_real_control_services", default_value="true"),
             DeclareLaunchArgument("arm_num", default_value="1"),
             DeclareLaunchArgument("arm_dof", default_value="6"),
-            DeclareLaunchArgument("server_host_1", default_value="192.168.4.23"),
+            DeclareLaunchArgument("server_host_1", default_value="192.168.6.4"),
             DeclareLaunchArgument("robot_speed", default_value="0.1"),
             DeclareLaunchArgument("robot_acc", default_value="0.15"),
             DeclareLaunchArgument("trajectory_speed_scale", default_value="1.0"),
             DeclareLaunchArgument("sync_with_trajectory_timing", default_value="true"),
             DeclareLaunchArgument("sim_time_scale", default_value="1.0"),
+            DeclareLaunchArgument("wait_for_real", default_value="true"),
+            DeclareLaunchArgument("real_feedback_topic", default_value="real_feedback_states"),
+            DeclareLaunchArgument("real_status_topic", default_value="/duco_cobot/robot_state"),
+            DeclareLaunchArgument("real_goal_tolerance", default_value="0.02"),
+            DeclareLaunchArgument("real_velocity_tolerance", default_value="0.05"),
+            DeclareLaunchArgument("real_execution_timeout", default_value="300.0"),
+            DeclareLaunchArgument("publish_real_stop_request", default_value="true"),
+            DeclareLaunchArgument("acceptance_timeout", default_value="5.0"),
+            DeclareLaunchArgument("sim_execution_timeout", default_value="300.0"),
+            DeclareLaunchArgument("cancel_timeout", default_value="5.0"),
+            DeclareLaunchArgument("enforce_expected_joint_names", default_value="true"),
             SetEnvironmentVariable(
                 name="GZ_SIM_RESOURCE_PATH",
                 value=[duco_support_share_parent, ":", EnvironmentVariable("GZ_SIM_RESOURCE_PATH", default_value="")],

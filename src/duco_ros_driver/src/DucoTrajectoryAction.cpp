@@ -131,15 +131,11 @@ rclcpp_action::GoalResponse DucoTrajectoryAction::goalCB(const rclcpp_action::Go
     RCLCPP_INFO(this->get_logger(),"Received new goal");
     std::shared_ptr<const FollowJointTrajectory::Goal>  tmp_gh = goal;
 
-    // reject all goals as long as we haven't heard from the remote controller
+    // The first feedback can arrive slightly after the first goal.
+    // Accept the goal anyway so the user does not need to click Execute twice.
     if (!controller_alive_)
     {
-        RCLCPP_ERROR(this->get_logger(),"Joint trajectory action rejected: waiting for (initial) feedback from controller");
-        control_msgs::action::FollowJointTrajectory_Result  rslt;
-        rslt.error_code = control_msgs::action::FollowJointTrajectory_Result::INVALID_GOAL;
-        // no point in continuing: already rejected
-        return rclcpp_action::GoalResponse::REJECT;
-
+        RCLCPP_WARN(this->get_logger(),"Joint trajectory action received before initial feedback; accepting goal anyway");
     }
     return rclcpp_action::GoalResponse::ACCEPT_AND_EXECUTE;
 

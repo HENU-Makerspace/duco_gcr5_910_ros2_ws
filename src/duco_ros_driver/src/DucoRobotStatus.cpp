@@ -150,9 +150,14 @@ void DucoRobotStatus::getRobotStatus()
             {
                 return;
             }
-            //status.robotState==5 disable
-            if((*edge_triggers[axis])(status.robotState)==Drop && status.robotState==5)
+            // Only publish a stop event when the controller drops to disable state
+            // while the robot is actually moving. This avoids false stop bursts
+            // during idle startup or transient status refreshes.
+            if (start_move_ && ((*edge_triggers[axis])(status.robotState) == Drop && status.robotState == 5))
             {
+                RCLCPP_WARN(
+                    this->get_logger(),
+                    "Robot state dropped to 5 while moving, publishing trajectory stop");
                 std_msgs::msg::String msg;
                 msg.data="stop";
                 stop_pub_->publish(msg);
@@ -186,7 +191,7 @@ void DucoRobotStatus::getRobotStatus()
                 robot_state_.cart_expect_velocity[i] = status.cartExpectVelocity[i];
                 robot_state_.cart_expect_accelera[i] = status.cartExpectAccelera[i];
                 robot_state_.cart_actual_position[i]  = status.cartActualPosition[i];
-                robot_state_.cart_actual_velocity[i] = status.cartActualAccelera[i];
+                robot_state_.cart_actual_velocity[i] = status.cartActualVelocity[i];
                 robot_state_.cart_actual_accelera[i] = status.cartActualAccelera[i];
                 robot_state_.slave_ready[i] = i < status.slaveReady.size() ? status.slaveReady[i] : false;
 

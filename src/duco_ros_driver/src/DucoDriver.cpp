@@ -195,9 +195,22 @@ bool DucoDriver::setRobotJointsByMoveIt()
 
 void DucoDriver::moveItPosCallback(const trajectory_msgs::msg::JointTrajectory::SharedPtr msg)
 {
-    if(msg->points.size() == 0 )
+    if(msg->points.size() == 0)
     {
-        RCLCPP_INFO(this->get_logger(), "DucoDriver::moveItPosCallback msg is empty");
+        RCLCPP_INFO(this->get_logger(), "DucoDriver::moveItPosCallback received stop command");
+        if(controller_connected_flag_)
+        {
+            for(auto & robot : duco_robots)
+            {
+                robot->trackClearQueue();
+                robot->stop(false);
+            }
+        }
+        for(auto & track : joint_track_)
+        {
+            track.clear();
+        }
+        return;
     }
     else
     {

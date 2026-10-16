@@ -9,8 +9,11 @@ include_directories(${CMAKE_CURRENT_SOURCE_DIR}/include)
 find_package(ament_cmake REQUIRED)
 find_package(rclcpp)
 find_package(rclcpp_action)
+find_package(builtin_interfaces REQUIRED)
 find_package(control_msgs)
-find_package(sensor_msgs)
+find_package(sensor_msgs REQUIRED)
+find_package(trajectory_msgs REQUIRED)
+find_package(std_msgs REQUIRED)
 find_package(duco_msg)
 
 # uncomment the following section in order to fill in
@@ -35,11 +38,11 @@ add_executable(DualTrajectoryAction src/DualTrajectoryAction.cpp)
 add_executable(DucoRobotControl src/DucoRobotControl.cpp src/RobotNode.cpp)
 
 
-ament_target_dependencies(DucoDriver rclcpp rclcpp_action control_msgs sensor_msgs duco_msg)
-ament_target_dependencies(DucoRobotStatus rclcpp rclcpp_action control_msgs sensor_msgs duco_msg)
-ament_target_dependencies(DucoTrajectoryAction rclcpp rclcpp_action control_msgs sensor_msgs duco_msg)
-ament_target_dependencies(DualTrajectoryAction rclcpp rclcpp_action control_msgs sensor_msgs duco_msg)
-ament_target_dependencies(DucoRobotControl rclcpp rclcpp_action control_msgs sensor_msgs duco_msg)
+ament_target_dependencies(DucoDriver rclcpp rclcpp_action control_msgs sensor_msgs trajectory_msgs std_msgs duco_msg)
+ament_target_dependencies(DucoRobotStatus rclcpp rclcpp_action control_msgs sensor_msgs trajectory_msgs std_msgs duco_msg)
+ament_target_dependencies(DucoTrajectoryAction rclcpp rclcpp_action control_msgs sensor_msgs trajectory_msgs std_msgs duco_msg)
+ament_target_dependencies(DualTrajectoryAction rclcpp rclcpp_action builtin_interfaces control_msgs sensor_msgs trajectory_msgs std_msgs duco_msg)
+ament_target_dependencies(DucoRobotControl rclcpp rclcpp_action control_msgs sensor_msgs trajectory_msgs std_msgs duco_msg)
 
 install (TARGETS DucoDriver DESTINATION lib/${PROJECT_NAME}
     )

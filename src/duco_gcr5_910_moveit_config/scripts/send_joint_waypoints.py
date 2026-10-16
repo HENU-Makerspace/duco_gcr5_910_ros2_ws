@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import argparse
+import math
 import sys
 
 import rclpy
@@ -42,6 +43,14 @@ def load_trajectory(path):
 
     names = data["joint_names"]
     points = data["waypoints"]
+    if not isinstance(names, list) or not names:
+        raise ValueError("joint_names must be a non-empty list")
+    if any(not isinstance(name, str) or not name for name in names):
+        raise ValueError("joint_names must contain non-empty strings")
+    if len(set(names)) != len(names):
+        raise ValueError("joint_names must not contain duplicates")
+    if not isinstance(points, list) or not points:
+        raise ValueError("waypoints must be a non-empty list")
     trajectory = FollowJointTrajectory.Goal().trajectory
     trajectory.joint_names = names
 
@@ -50,16 +59,33 @@ def load_trajectory(path):
         positions = waypoint["positions"]
         if len(positions) != len(names):
             raise ValueError(f"Waypoint {index} has {len(positions)} positions, expected {len(names)}")
+        position_values = [float(value) for value in positions]
+        if any(not math.isfinite(value) for value in position_values):
+            raise ValueError(f"Waypoint {index} positions contain NaN or Inf")
 
         duration = float(waypoint["duration"])
-        if duration <= previous_duration:
+        if not math.isfinite(duration) or duration <= previous_duration:
             raise ValueError(f"Waypoint {index} duration must be greater than the previous duration")
         previous_duration = duration
 
         point = JointTrajectoryPoint()
-        point.positions = [float(value) for value in positions]
-        point.time_from_start.sec = int(duration)
-        point.time_from_start.nanosec = int((duration - int(duration)) * 1_000_000_000)
+        point.positions = position_values
+        for field in ("velocities", "accelerations", "effort"):
+            if field in waypoint:
+                values = [float(value) for value in waypoint[field]]
+                if len(values) != len(names):
+                    raise ValueError(
+                        f"Waypoint {index} {field} has {len(values)} values, expected {len(names)}")
+                if any(not math.isfinite(value) for value in values):
+                    raise ValueError(f"Waypoint {index} {field} contains NaN or Inf")
+                setattr(point, field, values)
+        seconds = int(math.floor(duration))
+        nanoseconds = int(round((duration - seconds) * 1_000_000_000))
+        if nanoseconds >= 1_000_000_000:
+            seconds += 1
+            nanoseconds -= 1_000_000_000
+        point.time_from_start.sec = seconds
+        point.time_from_start.nanosec = nanoseconds
         trajectory.points.append(point)
 
     return trajectory
