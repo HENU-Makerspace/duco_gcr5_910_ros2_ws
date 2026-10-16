@@ -21,6 +21,9 @@
 
 #include "duco_msg/msg/duco_robot_state.hpp"
 
+#include "duco_ros_driver/RealFeedbackGate.hpp"
+#include "duco_ros_driver/TrajectoryValidation.hpp"
+
 class DualTrajectoryAction : public rclcpp::Node
 {
 public:
@@ -46,6 +49,15 @@ public:
       "real_status_topic", "/duco_cobot/robot_state");
     real_goal_tolerance_ = declare_parameter<double>("real_goal_tolerance", 0.02);
     real_velocity_tolerance_ = declare_parameter<double>("real_velocity_tolerance", 0.05);
+    // The vendor status and feedback topics are published from the same 20 ms
+    // loop (~50 Hz), so 1.0 s tolerates ~50 consecutive missed samples before
+    // the data is treated as stale.  Tune these down for stricter monitoring.
+    real_feedback_timeout_ = declare_parameter<double>("real_feedback_timeout", 1.0);
+    real_status_timeout_ = declare_parameter<double>("real_status_timeout", 1.0);
+    // DucoDriver::setRobotJointsByMoveIt() unconditionally drops the first path
+    // point, so a trajectory with fewer than two points is enqueued as an empty
+    // path.  Refuse to forward such a command to the real controller.
+    min_real_trajectory_points_ = declare_parameter<int>("min_real_trajectory_points", 2);
     real_execution_timeout_ = declare_parameter<double>("real_execution_timeout", 300.0);
     wait_for_sim_seconds_ = declare_parameter<double>("wait_for_sim_seconds", 5.0);
     acceptance_timeout_ = declare_parameter<double>("acceptance_timeout", wait_for_sim_seconds_);
@@ -176,185 +188,24 @@ private:
         throw std::invalid_argument("joint position limits must be finite and min <= max");
       }
     }
-  }
 
-  bool durationNanoseconds(
-    const builtin_interfaces::msg::Duration & duration, int64_t & nanoseconds,
-    std::string & error) const
-  {
-    if (duration.sec < 0) {
-      error = "duration has a negative seconds field";
-      return false;
-    }
-    if (duration.nanosec >= 1000000000U) {
-      error = "duration nanoseconds field is outside [0, 1e9)";
-      return false;
-    }
-    constexpr int64_t billion = 1000000000LL;
-    if (static_cast<int64_t>(duration.sec) >
-      (std::numeric_limits<int64_t>::max() - duration.nanosec) / billion)
-    {
-      error = "duration overflows int64 nanoseconds";
-      return false;
-    }
-    nanoseconds = static_cast<int64_t>(duration.sec) * billion + duration.nanosec;
-    return true;
-  }
-
-  bool validateTrajectory(
-    const trajectory_msgs::msg::JointTrajectory & trajectory, std::string & error) const
-  {
-    if (trajectory.joint_names.empty()) {
-      error = "joint_names is empty";
-      return false;
-    }
-    std::unordered_set<std::string> names;
-    for (const auto & name : trajectory.joint_names) {
-      if (name.empty()) {
-        error = "joint_names contains an empty name";
-        return false;
-      }
-      if (!names.insert(name).second) {
-        error = "joint_names contains duplicate name: " + name;
-        return false;
-      }
-    }
-    if (enforce_expected_joint_names_ && trajectory.joint_names != expected_joint_names_) {
-      error = "joint_names do not exactly match expected_joint_names";
-      return false;
-    }
-    if (trajectory.points.empty()) {
-      error = "trajectory points is empty";
-      return false;
+    requirePositiveFinite(real_feedback_timeout_, "real_feedback_timeout");
+    requirePositiveFinite(real_status_timeout_, "real_status_timeout");
+    if (min_real_trajectory_points_ < 1) {
+      throw std::invalid_argument("min_real_trajectory_points must be >= 1");
     }
 
-    int64_t previous_time = -1;
-    for (size_t point_index = 0; point_index < trajectory.points.size(); ++point_index) {
-      const auto & point = trajectory.points[point_index];
-      const size_t joint_count = trajectory.joint_names.size();
-      if (point.positions.size() != joint_count) {
-        error = "point " + std::to_string(point_index) + " positions dimension is " +
-          std::to_string(point.positions.size()) + ", expected " + std::to_string(joint_count);
-        return false;
-      }
-      if ((!point.velocities.empty() && point.velocities.size() != joint_count) ||
-        (!point.accelerations.empty() && point.accelerations.size() != joint_count) ||
-        (!point.effort.empty() && point.effort.size() != joint_count))
-      {
-        error = "optional point array dimension does not match joint count at point " +
-          std::to_string(point_index);
-        return false;
-      }
-      const auto checkFinite = [&](const std::vector<double> & values, const char * field) {
-        for (const double value : values) {
-          if (!std::isfinite(value)) {
-            error = std::string(field) + " contains NaN or Inf at point " +
-              std::to_string(point_index);
-            return false;
-          }
-        }
-        return true;
-      };
-      if (!checkFinite(point.positions, "positions") ||
-        !checkFinite(point.velocities, "velocities") ||
-        !checkFinite(point.accelerations, "accelerations") ||
-        !checkFinite(point.effort, "effort"))
-      {
-        return false;
-      }
-
-      int64_t current_time = 0;
-      if (!durationNanoseconds(point.time_from_start, current_time, error)) {
-        error = "point " + std::to_string(point_index) + ": " + error;
-        return false;
-      }
-      if (previous_time >= 0 && current_time <= previous_time) {
-        error = "time_from_start must be strictly increasing at point " +
-          std::to_string(point_index);
-        return false;
-      }
-      previous_time = current_time;
-
-      if (!joint_position_min_.empty()) {
-        for (size_t joint_index = 0; joint_index < joint_count; ++joint_index) {
-          if (point.positions[joint_index] < joint_position_min_[joint_index] ||
-            point.positions[joint_index] > joint_position_max_[joint_index])
-          {
-            error = "position limit violated at point " + std::to_string(point_index) +
-              ", joint " + trajectory.joint_names[joint_index];
-            return false;
-          }
-        }
-      }
-    }
-    return true;
-  }
-
-  bool scaleTrajectoryTime(
-    trajectory_msgs::msg::JointTrajectory & trajectory, double scale, std::string & error) const
-  {
-    if (!std::isfinite(scale) || scale <= 0.0) {
-      error = "sim_time_scale must be finite and > 0";
-      return false;
-    }
-    constexpr long double billion = 1000000000.0L;
-    constexpr long double max_duration =
-      static_cast<long double>(std::numeric_limits<int32_t>::max()) * billion + (billion - 1.0L);
-    int64_t previous_scaled = -1;
-    const long double scale_ld = static_cast<long double>(scale);
-    const long double velocity_scale = 1.0L / scale_ld;
-    const long double acceleration_scale = velocity_scale * velocity_scale;
-
-    for (size_t point_index = 0; point_index < trajectory.points.size(); ++point_index) {
-      auto & point = trajectory.points[point_index];
-      int64_t original = 0;
-      if (!durationNanoseconds(point.time_from_start, original, error)) {
-        return false;
-      }
-      const long double scaled = static_cast<long double>(original) * scale_ld;
-      if (!std::isfinite(scaled) || scaled < 0.0L || scaled > max_duration) {
-        error = "scaled trajectory duration overflows at point " + std::to_string(point_index);
-        return false;
-      }
-      const int64_t scaled_ns = static_cast<int64_t>(std::llround(scaled));
-      if (previous_scaled >= 0 && scaled_ns <= previous_scaled) {
-        error = "scaled time_from_start is not strictly increasing at point " +
-          std::to_string(point_index);
-        return false;
-      }
-      previous_scaled = scaled_ns;
-      point.time_from_start.sec = static_cast<int32_t>(scaled_ns / 1000000000LL);
-      point.time_from_start.nanosec = static_cast<uint32_t>(scaled_ns % 1000000000LL);
-
-      const auto scaleValues = [&](std::vector<double> & values, long double factor, const char * field) {
-        for (double & value : values) {
-          const long double scaled_value = static_cast<long double>(value) * factor;
-          if (!std::isfinite(scaled_value) ||
-            scaled_value > std::numeric_limits<double>::max() ||
-            scaled_value < -std::numeric_limits<double>::max())
-          {
-            error = std::string("scaled ") + field + " is not finite at point " +
-              std::to_string(point_index);
-            return false;
-          }
-          value = static_cast<double>(scaled_value);
-        }
-        return true;
-      };
-      if (!scaleValues(point.velocities, velocity_scale, "velocities") ||
-        !scaleValues(point.accelerations, acceleration_scale, "accelerations"))
-      {
-        return false;
-      }
-    }
-    return true;
+    trajectory_policy_.enforce_expected_joint_names = enforce_expected_joint_names_;
+    trajectory_policy_.expected_joint_names = expected_joint_names_;
+    trajectory_policy_.joint_position_min = joint_position_min_;
+    trajectory_policy_.joint_position_max = joint_position_max_;
   }
 
   rclcpp_action::GoalResponse handle_goal(
     const GoalUUID & goal_id, std::shared_ptr<const FollowJointTrajectory::Goal> goal)
   {
     std::string error;
-    if (!validateTrajectory(goal->trajectory, error)) {
+    if (!duco_reliability::validateTrajectory(goal->trajectory, trajectory_policy_, error)) {
       RCLCPP_ERROR(
         get_logger(), "Rejecting goal %s: invalid trajectory: %s",
         goalIdText(goal_id).c_str(), error.c_str());
@@ -442,6 +293,7 @@ private:
       sim_done_ = false;
       real_command_sent_ = false;
       real_feedback_sequence_at_command_ = real_feedback_sequence_;
+      real_status_sequence_at_command_ = real_status_sequence_;
       real_faulted_ = false;
       real_fault_reason_.clear();
       terminal_state_ = false;
@@ -452,7 +304,7 @@ private:
     FollowJointTrajectory::Goal sim_goal;
     sim_goal.trajectory = goal->trajectory;
     std::string error;
-    if (!scaleTrajectoryTime(sim_goal.trajectory, sim_time_scale_, error)) {
+    if (!duco_reliability::scaleTrajectoryTime(sim_goal.trajectory, sim_time_scale_, error)) {
       finishGoal(
         goal_handle, rclcpp_action::ResultCode::ABORTED,
         FollowJointTrajectory::Result::INVALID_GOAL,
@@ -469,6 +321,8 @@ private:
       [this, goal_handle, real_trajectory](const SimGoalHandle::SharedPtr & sim_goal_handle) {
         bool cancel_immediately = false;
         bool publish_real = false;
+        bool real_precheck_failed = false;
+        std::string real_precheck_error;
         {
           std::lock_guard<std::mutex> lock(state_mutex_);
           if (active_goal_ != goal_handle || terminal_state_) {
@@ -485,9 +339,16 @@ private:
               sim_deadline_ = std::chrono::steady_clock::now() + secondsToSteady(sim_execution_timeout_);
               publish_real = publish_real_;
               if (publish_real) {
-                real_command_sent_ = true;
-                real_feedback_sequence_at_command_ = real_feedback_sequence_;
-                real_command_time_ = std::chrono::steady_clock::now();
+                // Last chance to refuse before the real arm is commanded.
+                if (!validateRealCommandLocked(real_trajectory, real_precheck_error)) {
+                  real_precheck_failed = true;
+                  publish_real = false;
+                } else {
+                  real_command_sent_ = true;
+                  real_feedback_sequence_at_command_ = real_feedback_sequence_;
+                  real_status_sequence_at_command_ = real_status_sequence_;
+                  real_command_time_ = std::chrono::steady_clock::now();
+                }
               }
             }
           }
@@ -508,6 +369,20 @@ private:
         }
         if (cancel_immediately) {
           requestSimulationCancel(goal_handle, sim_goal_handle);
+          return;
+        }
+        if (real_precheck_failed) {
+          // The simulation has already accepted the goal but the real command
+          // is not safe to send, so the two arms would diverge.  Cancel the
+          // simulation and report the refusal rather than silently continuing.
+          RCLCPP_ERROR(
+            get_logger(), "Goal %s: refusing to command the real robot: %s",
+            goalIdText(goal_handle->get_goal_id()).c_str(), real_precheck_error.c_str());
+          requestSimulationCancel(goal_handle, sim_goal_handle);
+          finishGoal(
+            goal_handle, rclcpp_action::ResultCode::ABORTED,
+            FollowJointTrajectory::Result::INVALID_GOAL,
+            "Refused to command the real robot: " + real_precheck_error);
           return;
         }
         if (publish_real) {
@@ -605,6 +480,10 @@ private:
       latest_real_joint_names_ = msg->joint_names;
       latest_real_positions_ = msg->actual.positions;
       latest_real_velocities_ = msg->actual.velocities;
+      // The vendor message carries no timestamp, so freshness is measured from
+      // local arrival.  These values are re-published after the controller
+      // connection drops, which is why arrival alone proves nothing.
+      latest_real_feedback_time_ = std::chrono::steady_clock::now();
       ++real_feedback_sequence_;
       goal = active_goal_;
     }
@@ -626,6 +505,13 @@ private:
     bool log_fault = false;
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
+      // Unlike the feedback topic, the status topic stops publishing when the
+      // controller connection drops (DucoRobotStatus::getRobotStatus only
+      // publishes inside the connected branch).  This counter is therefore the
+      // liveness signal the feedback gate depends on.
+      ++real_status_sequence_;
+      latest_real_status_time_ = std::chrono::steady_clock::now();
+      latest_real_status_healthy_ = reason.empty();
       if (!reason.empty()) {
         log_fault = !real_faulted_ || real_fault_reason_ != reason;
         real_faulted_ = true;
@@ -690,38 +576,94 @@ private:
       std::chrono::duration<double>(seconds));
   }
 
-  bool realAtGoalLocked() const
+  /**
+   * \brief Final checks performed immediately before the real trajectory is
+   * published.  Caller must hold state_mutex_.
+   *
+   * Returns false and fills \p error when the command must not be sent.  This
+   * function never attempts to recover or clear a robot fault; recovery is an
+   * explicit operator action.
+   */
+  bool validateRealCommandLocked(
+    const trajectory_msgs::msg::JointTrajectory & trajectory, std::string & error) const
   {
-    if (!real_command_sent_ || real_feedback_sequence_ <= real_feedback_sequence_at_command_ ||
-      active_real_trajectory_.points.empty() || latest_real_joint_names_.empty())
+    if (real_faulted_) {
+      error = "real robot fault is active: " + real_fault_reason_;
+      return false;
+    }
+    if (real_command_sent_) {
+      error = "a previously published real trajectory has not been confirmed";
+      return false;
+    }
+
+    const auto now = std::chrono::steady_clock::now();
+    if (latest_real_status_time_ == std::chrono::steady_clock::time_point{}) {
+      error = "no real robot status has been received yet";
+      return false;
+    }
+    if (now < latest_real_status_time_ ||
+      now - latest_real_status_time_ > secondsToSteady(real_status_timeout_))
     {
+      error = "real robot status is stale";
       return false;
     }
-    const auto & target = active_real_trajectory_.points.back().positions;
-    if (target.size() != active_real_trajectory_.joint_names.size()) {
+    if (!latest_real_status_healthy_) {
+      error = "real robot status reports a fault";
       return false;
     }
-    for (size_t target_index = 0; target_index < target.size(); ++target_index) {
-      const auto it = std::find(
-        latest_real_joint_names_.begin(), latest_real_joint_names_.end(),
-        active_real_trajectory_.joint_names[target_index]);
-      if (it == latest_real_joint_names_.end()) {
-        return false;
-      }
-      const size_t actual_index = static_cast<size_t>(
-        std::distance(latest_real_joint_names_.begin(), it));
-      if (actual_index >= latest_real_positions_.size() ||
-        std::abs(latest_real_positions_[actual_index] - target[target_index]) > real_goal_tolerance_)
-      {
-        return false;
-      }
-      if (actual_index < latest_real_velocities_.size() &&
-        std::abs(latest_real_velocities_[actual_index]) > real_velocity_tolerance_)
-      {
-        return false;
-      }
+
+    if (trajectory.points.size() < static_cast<size_t>(min_real_trajectory_points_)) {
+      error = "trajectory has " + std::to_string(trajectory.points.size()) +
+        " point(s) but the real driver needs at least " +
+        std::to_string(min_real_trajectory_points_) +
+        " because it drops the first point";
+      return false;
     }
     return true;
+  }
+
+  /**
+   * \brief Build the feedback-gate inputs from the cached state and evaluate
+   * them.  Caller must hold state_mutex_.
+   *
+   * Replaces the previous value-difference check, which accepted NaN because
+   * every comparison against NaN is false, and skipped the velocity test
+   * entirely when the velocity array was empty.
+   */
+  duco_reliability::FeedbackVerdict evaluateRealAtGoalLocked(
+    std::chrono::steady_clock::time_point now) const
+  {
+    if (!real_command_sent_ || active_real_trajectory_.points.empty()) {
+      return duco_reliability::FeedbackVerdict::InvalidTarget;
+    }
+
+    duco_reliability::GoalTarget target;
+    target.joint_names = active_real_trajectory_.joint_names;
+    target.final_positions = active_real_trajectory_.points.back().positions;
+    target.feedback_sequence_at_command = real_feedback_sequence_at_command_;
+    target.status_sequence_at_command = real_status_sequence_at_command_;
+
+    duco_reliability::FeedbackSnapshot feedback;
+    feedback.joint_names = latest_real_joint_names_;
+    feedback.positions = latest_real_positions_;
+    feedback.velocities = latest_real_velocities_;
+    feedback.received_at = latest_real_feedback_time_;
+    feedback.sequence = real_feedback_sequence_;
+
+    duco_reliability::StatusSnapshot status;
+    status.healthy = latest_real_status_healthy_;
+    status.received_at = latest_real_status_time_;
+    status.sequence = real_status_sequence_;
+
+    duco_reliability::FeedbackPolicy policy;
+    policy.position_tolerance = real_goal_tolerance_;
+    policy.velocity_tolerance = real_velocity_tolerance_;
+    policy.feedback_max_age = std::chrono::duration_cast<std::chrono::milliseconds>(
+      secondsToSteady(real_feedback_timeout_));
+    policy.status_max_age = std::chrono::duration_cast<std::chrono::milliseconds>(
+      secondsToSteady(real_status_timeout_));
+
+    return duco_reliability::evaluateRealFeedback(target, feedback, status, policy, now);
   }
 
   void tryFinishGoal(const std::shared_ptr<GoalHandle> & goal)
@@ -731,6 +673,8 @@ private:
     }
     bool success = false;
     std::string fault_reason;
+    auto verdict = duco_reliability::FeedbackVerdict::Reached;
+    const auto now = std::chrono::steady_clock::now();
     {
       std::lock_guard<std::mutex> lock(state_mutex_);
       if (active_goal_ != goal || terminal_state_ || task_state_ == TaskState::Canceling) {
@@ -738,22 +682,37 @@ private:
       }
       if (real_faulted_) {
         fault_reason = real_fault_reason_;
-      } else if (sim_done_ && (!wait_for_real_ || !publish_real_ || realAtGoalLocked())) {
+      } else if (!sim_done_) {
+        return;
+      } else if (!wait_for_real_ || !publish_real_) {
+        // Pure simulation, or the operator asked not to wait for the real arm.
         success = true;
       } else {
-        return;
+        verdict = evaluateRealAtGoalLocked(now);
+        success = verdict == duco_reliability::FeedbackVerdict::Reached;
       }
     }
     if (success) {
       finishGoal(
         goal, rclcpp_action::ResultCode::SUCCEEDED,
         FollowJointTrajectory::Result::SUCCESSFUL, "");
-    } else {
-      finishGoal(
-        goal, rclcpp_action::ResultCode::ABORTED,
-        FollowJointTrajectory::Result::PATH_TOLERANCE_VIOLATED,
-        "Aborting synchronized trajectory: " + fault_reason);
+      return;
     }
+    if (fault_reason.empty()) {
+      // The simulation finished but the real arm is not confirmed at the goal.
+      // Record why, throttled, because this runs on every real feedback and
+      // status message (~100 Hz combined).
+      RCLCPP_INFO_THROTTLE(
+        get_logger(), *get_clock(), 2000,
+        "Goal %s: waiting for real completion, feedback verdict is '%s'",
+        goalIdText(goal->get_goal_id()).c_str(),
+        duco_reliability::feedbackVerdictName(verdict));
+      return;
+    }
+    finishGoal(
+      goal, rclcpp_action::ResultCode::ABORTED,
+      FollowJointTrajectory::Result::PATH_TOLERANCE_VIOLATED,
+      "Aborting synchronized trajectory: " + fault_reason);
   }
 
   void finishGoal(
@@ -813,6 +772,9 @@ private:
   std::string real_status_topic_;
   double real_goal_tolerance_{0.02};
   double real_velocity_tolerance_{0.05};
+  double real_feedback_timeout_{1.0};
+  double real_status_timeout_{1.0};
+  int min_real_trajectory_points_{2};
   double real_execution_timeout_{300.0};
   double wait_for_sim_seconds_{5.0};
   double acceptance_timeout_{5.0};
@@ -823,6 +785,8 @@ private:
   std::vector<std::string> expected_joint_names_;
   std::vector<double> joint_position_min_;
   std::vector<double> joint_position_max_;
+  /// Derived once from the parameters above; used by the trajectory rules.
+  duco_reliability::TrajectoryValidationPolicy trajectory_policy_;
 
   rclcpp::Publisher<trajectory_msgs::msg::JointTrajectory>::SharedPtr real_command_pub_;
   rclcpp_action::Client<FollowJointTrajectory>::SharedPtr sim_action_client_;
@@ -848,6 +812,14 @@ private:
   std::string real_fault_reason_;
   uint64_t real_feedback_sequence_{0};
   uint64_t real_feedback_sequence_at_command_{0};
+  /// Counter over status messages.  DucoRobotStatus stops publishing status
+  /// when the controller connection drops, while the feedback topic keeps
+  /// re-publishing cached values, so this is the real liveness signal.
+  uint64_t real_status_sequence_{0};
+  uint64_t real_status_sequence_at_command_{0};
+  std::chrono::steady_clock::time_point latest_real_feedback_time_{};
+  std::chrono::steady_clock::time_point latest_real_status_time_{};
+  bool latest_real_status_healthy_{false};
   std::chrono::steady_clock::time_point reservation_time_{};
   std::chrono::steady_clock::time_point acceptance_deadline_{};
   std::chrono::steady_clock::time_point sim_deadline_{};

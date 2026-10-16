@@ -30,6 +30,20 @@ if(BUILD_TESTING)
   # a copyright and license is added to all source files
   set(ament_cmake_cpplint_FOUND TRUE)
   ament_lint_auto_find_test_dependencies()
+
+  find_package(ament_cmake_gtest REQUIRED)
+
+  # Pure-logic unit tests.  These deliberately avoid ROS nodes, executors and
+  # simulated action servers so they stay fast and deterministic.
+  ament_add_gtest(test_real_feedback_gate test/test_real_feedback_gate.cpp)
+  target_include_directories(test_real_feedback_gate PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+
+  ament_add_gtest(test_trajectory_validation test/test_trajectory_validation.cpp)
+  target_include_directories(test_trajectory_validation PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}/include)
+  ament_target_dependencies(test_trajectory_validation
+    builtin_interfaces trajectory_msgs)
 endif()
 add_executable(DucoDriver src/DucoDriver.cpp src/DucoDriverNode.cpp src/RobotNode.cpp)
 add_executable(DucoRobotStatus src/DucoRobotStatus.cpp src/DucoRobotStatusNode.cpp src/RobotNode.cpp)
